@@ -13,7 +13,7 @@ graph_schema.py — 节点/边统一 Schema 与 CodeGraph 数据结构
   end_line    : int   — 源码结束行（1-based）
   code_text   : str   — 对应的源码文本（原始字符串，后续用于 embedding）
   # 添加代码注释字段
-  
+
 边 Schema
 ----------
   src         : str   — 源节点 id
@@ -85,6 +85,8 @@ class CodeNode:
     start_line:     int
     end_line:       int
     code_text:      str = ""
+    comment:   str = ""   # LLM 生成的自然语言注释
+
 
     def to_dict(self) -> dict:
         d = asdict(self)

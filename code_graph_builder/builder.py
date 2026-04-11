@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BuildConfig:
     """
-    控制各关系层的开关，用于消融实验或快速调试。
+    控制各关系层与注释生成的开关，用于消融实验或快速调试。
 
     Attributes
     ----------
@@ -48,6 +48,14 @@ class BuildConfig:
     enable_ast_relations  : bool   — 是否构建 AST 父子/兄弟关系
     enable_call_graph     : bool   — 是否构建函数调用图
     enable_inheritance    : bool   — 是否构建类继承图
+    enable_annotation     : bool   — 是否调用 LLM 生成节点注释（comment 字段）
+                                     默认 False，需要显式传入 llm_backend 才会生效
+    llm_backend           : LLMBackend | None
+                                   — 用于生成注释的 LLM 后端实例
+                                     None 时即使 enable_annotation=True 也不执行
+    annotation_config     : AnnotatorConfig | None
+                                   — 注释生成的详细配置（并发数/截断长度等）
+                                     None 时使用默认值
     exclude_dirs          : set    — 额外需要排除的目录名
     save_path             : str    — 构建完成后自动保存的路径（None 则不保存）
     save_format           : str    — 保存格式，'json' 或 'pickle'
@@ -56,9 +64,12 @@ class BuildConfig:
     enable_ast_relations:  bool = True
     enable_call_graph:     bool = True
     enable_inheritance:    bool = True
+    enable_annotation:     bool = False        # 默认关闭，避免无意中消耗 API
+    llm_backend:           object = None       # LLMBackend 实例，避免循环 import
+    annotation_config:     object = None       # AnnotatorConfig 实例
     exclude_dirs:          Set[str] = field(default_factory=set)
     save_path:             Optional[str] = None
-    save_format:           str = "pickle"   # 'json' | 'pickle'
+    save_format:           str = "pickle"      # 'json' | 'pickle'
 
 
 # ---------------------------------------------------------------------------
@@ -77,25 +88,38 @@ class CodeGraphBuilder:
     >>> print(graph)
     CodeGraph(repo='/path/to/repo', nodes=512, edges=1024)
 
-    保存 / 加载
-    -----------
+    启用 LLM 注释生成
+    -----------------
+    >>> import os
+    >>> from code_graph_builder import AnthropicBackend
+    >>> from code_graph_builder.builder import BuildConfig
+    >>> cfg = BuildConfig(
+    ...     enable_annotation=True,
+    ...     llm_backend=AnthropicBackend(api_key=os.environ["ANTHROPIC_API_KEY"]),
+    ... )
+    >>> graph = builder.build(config=cfg)
+    >>> node = graph.get_node("src/models.py::User")
+    >>> print(node.comment)   # 输出 LLM 生成的结构化注释
+
+    使用 Mock 后端（测试用，不消耗 API）
+    ------------------------------------
+    >>> from code_graph_builder import MockBackend
+    >>> cfg = BuildConfig(enable_annotation=True, llm_backend=MockBackend())
+    >>> graph = builder.build(config=cfg)
+
+    保存 / 加载（注释一并序列化）
+    ------------------------------
     >>> graph.save_pickle("code_graph.pkl")
     >>> from code_graph_builder import CodeGraph
     >>> graph = CodeGraph.load_pickle("code_graph.pkl")
 
-    消融实验（仅 AST + 调用图，不含继承）
-    ----------------------------------------
-    >>> from code_graph_builder.builder import BuildConfig
-    >>> cfg = BuildConfig(enable_inheritance=False)
+    消融实验（仅 AST + 调用图，不含继承和注释）
+    --------------------------------------------
+    >>> cfg = BuildConfig(enable_inheritance=False, enable_annotation=False)
     >>> graph = builder.build(config=cfg)
     """
 
     def __init__(self, repo_root: str):
-        """
-        Parameters
-        ----------
-        repo_root : 仓库根目录的绝对路径或相对路径。
-        """
         import os
         self.repo_root = os.path.abspath(repo_root)
 
@@ -109,11 +133,11 @@ class CodeGraphBuilder:
 
         Parameters
         ----------
-        config : BuildConfig，可选。默认开启所有关系层。
+        config : BuildConfig，可选。默认开启所有结构关系层，关闭注释生成。
 
         Returns
         -------
-        CodeGraph : 包含所有节点与多类型边的完整代码图。
+        CodeGraph : 包含所有节点、多类型边，以及可选 LLM 注释的代码图。
         """
         if config is None:
             config = BuildConfig()
@@ -153,6 +177,15 @@ class CodeGraphBuilder:
                 graph,
             )
 
+        # Step 5：LLM 注释生成（可选）
+        if config.enable_annotation and config.llm_backend is not None:
+            self._run_annotation(graph, config)
+        elif config.enable_annotation and config.llm_backend is None:
+            logger.warning(
+                "enable_annotation=True 但未提供 llm_backend，跳过注释生成。\n"
+                "请在 BuildConfig 中传入 llm_backend=AnthropicBackend(...) 等后端实例。"
+            )
+
         elapsed = time.perf_counter() - total_start
         stats = graph.stats()
         logger.info(
@@ -183,4 +216,21 @@ class CodeGraphBuilder:
         logger.info(
             "[%s] done in %.2fs | nodes=%d  edges=%d",
             name, elapsed, stats["total_nodes"], stats["total_edges"],
+        )
+
+    @staticmethod
+    def _run_annotation(graph: CodeGraph, config: BuildConfig) -> None:
+        """调用 CommentAnnotator 为图中节点生成注释。"""
+        # 延迟导入，避免在不需要注释时引入不必要依赖
+        from .comment_annotator import CommentAnnotator, AnnotatorConfig
+
+        t0 = time.perf_counter()
+        annotator = CommentAnnotator(backend=config.llm_backend)
+        ann_cfg   = config.annotation_config or AnnotatorConfig()
+        result    = annotator.annotate(graph, config=ann_cfg)
+        elapsed   = time.perf_counter() - t0
+
+        logger.info(
+            "[CommentAnnotator] done in %.2fs | %s",
+            elapsed, result,
         )

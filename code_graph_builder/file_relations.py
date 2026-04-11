@@ -171,6 +171,7 @@ class FileRelationBuilder:
             start_line=1,
             end_line=line_count,
             code_text="",  # 文件级节点不存储全文，节省内存
+            # 但可以考虑存储注释
         )
         graph.add_node(node)
 
