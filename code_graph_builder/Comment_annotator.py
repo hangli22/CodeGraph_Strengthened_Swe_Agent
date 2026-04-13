@@ -40,7 +40,21 @@ comment_annotator.py — LLM 驱动的代码注释生成模块
 -------------------------------------------
   - 每次调用约 200~400 tokens（输入+输出）
   - 总计约 120K~240K tokens
-  - claude-haiku 费率下约 $0.02~0.04（可接受）
+  - 阿里云 qwen-plus 费率下约 ¥0.1~0.2（可接受）
+
+阿里云 DashScope 配置
+---------------------
+  接口地址 : https://ws-s76npq0ctcwdkc1l.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  环境变量 : DASHSCOPE_API_KEY
+  默认模型 : qwen-plus（综合性价比最优）
+  可选模型 : qwen-turbo（更快）/ qwen-max（更强）
+
+后端优先级（get_default_backend 自动选择）
+-----------------------------------------
+  1. DashScopeBackend  — 阿里云百炼（DASHSCOPE_API_KEY）★ 优先
+  2. AnthropicBackend  — Anthropic Claude（ANTHROPIC_API_KEY）
+  3. OpenAIBackend     — OpenAI（OPENAI_API_KEY）
+  4. MockBackend       — 测试用，不消耗配额
 """
 
 from __future__ import annotations
@@ -193,6 +207,128 @@ class OpenAIBackend(LLMBackend):
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"OpenAI API 错误 {e.code}: {body}") from e
+
+
+class DashScopeBackend(LLMBackend):
+    """
+    阿里云百炼 DashScope 后端（OpenAI 兼容接口）。★ 默认优先使用
+
+    使用你的阿里云工作空间的 OpenAI 兼容接入点，无需额外安装任何依赖。
+    API Key 从环境变量 DASHSCOPE_API_KEY 读取，或在构造时传入。
+
+    接入点 : https://ws-s76npq0ctcwdkc1l.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+    文档   : https://help.aliyun.com/zh/model-studio/
+
+    Usage
+    -----
+    # 方式一：自动读取环境变量 DASHSCOPE_API_KEY
+    backend = DashScopeBackend()
+
+    # 方式二：显式传入
+    backend = DashScopeBackend(api_key="sk-xxx", model="qwen-max")
+
+    可选模型
+    --------
+    qwen-plus   : 综合性价比最优（默认）
+    qwen-turbo  : 响应最快，适合大批量标注
+    qwen-max    : 能力最强，适合复杂代码
+    qwen-long   : 超长上下文，适合大文件
+    """
+
+    # 你的工作空间 OpenAI 兼容接入点
+    API_URL = (
+        "https://ws-s76npq0ctcwdkc1l.cn-beijing.maas.aliyuncs.com"
+        "/compatible-mode/v1/chat/completions"
+    )
+    MODEL = "qwen-plus"
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        timeout: int = 60,   # 阿里云国内节点延迟通常在 5~15s，给足余量
+    ):
+        import os
+        self.api_key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
+        if not self.api_key:
+            raise ValueError(
+                "未找到阿里云 DashScope API Key。\n"
+                "请设置环境变量 DASHSCOPE_API_KEY=sk-xxx，\n"
+                "或在构造时传入 DashScopeBackend(api_key='sk-xxx')"
+            )
+        self.model   = model or self.MODEL
+        self.timeout = timeout
+
+    def generate(self, prompt: str) -> str:
+        import json
+        import urllib.request
+        import urllib.error
+
+        payload = json.dumps({
+            "model":      self.model,
+            "max_tokens": 512,
+            "messages":   [{"role": "user", "content": prompt}],
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            self.API_URL,
+            data=payload,
+            headers={
+                "Content-Type":  "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data["choices"][0]["message"]["content"].strip()
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"DashScope API 错误 {e.code}: {body}") from e
+
+
+def get_default_backend(verbose: bool = True) -> LLMBackend:
+    """
+    按优先级自动选择可用的 LLM 后端。
+
+    优先级：DashScope（阿里云）> Anthropic > OpenAI > MockBackend（兜底）
+
+    Parameters
+    ----------
+    verbose : 是否打印选择结果（默认 True）
+
+    Returns
+    -------
+    LLMBackend : 第一个可用后端的实例
+
+    Usage
+    -----
+    backend = get_default_backend()
+    annotator = CommentAnnotator(backend)
+    """
+    import os
+
+    candidates = [
+        ("DashScope（阿里云）", "DASHSCOPE_API_KEY",  DashScopeBackend),
+        ("Anthropic",           "ANTHROPIC_API_KEY",  AnthropicBackend),
+        ("OpenAI",              "OPENAI_API_KEY",      OpenAIBackend),
+    ]
+
+    for name, env_var, cls in candidates:
+        key = os.environ.get(env_var, "")
+        if key:
+            if verbose:
+                logger.info("自动选择后端: %s（%s 已设置）", name, env_var)
+            try:
+                return cls(api_key=key)
+            except Exception as e:
+                logger.warning("后端 %s 初始化失败: %s，尝试下一个", name, e)
+
+    logger.warning(
+        "未找到任何 API Key（DASHSCOPE_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY），"
+        "使用 MockBackend（不生成真实注释）。"
+    )
+    return MockBackend()
 
 
 class MockBackend(LLMBackend):
