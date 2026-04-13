@@ -20,10 +20,12 @@ from .comment_annotator import (
     CommentAnnotator,
     AnnotatorConfig,
     AnnotationResult,
+    DashScopeBackend,
     AnthropicBackend,
     OpenAIBackend,
     MockBackend,
     LLMBackend,
+    get_default_backend,
 )
 
 __all__ = [
@@ -39,8 +41,10 @@ __all__ = [
     "CommentAnnotator",
     "AnnotatorConfig",
     "AnnotationResult",
+    "DashScopeBackend",
     "AnthropicBackend",
     "OpenAIBackend",
     "MockBackend",
     "LLMBackend",
+    "get_default_backend",
 ]

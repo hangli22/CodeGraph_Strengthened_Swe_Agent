@@ -178,13 +178,9 @@ class CodeGraphBuilder:
             )
 
         # Step 5：LLM 注释生成（可选）
-        if config.enable_annotation and config.llm_backend is not None:
+        # llm_backend=None 时由 _run_annotation 内部调用 get_default_backend() 自动选择
+        if config.enable_annotation:
             self._run_annotation(graph, config)
-        elif config.enable_annotation and config.llm_backend is None:
-            logger.warning(
-                "enable_annotation=True 但未提供 llm_backend，跳过注释生成。\n"
-                "请在 BuildConfig 中传入 llm_backend=AnthropicBackend(...) 等后端实例。"
-            )
 
         elapsed = time.perf_counter() - total_start
         stats = graph.stats()
@@ -221,11 +217,13 @@ class CodeGraphBuilder:
     @staticmethod
     def _run_annotation(graph: CodeGraph, config: BuildConfig) -> None:
         """调用 CommentAnnotator 为图中节点生成注释。"""
-        # 延迟导入，避免在不需要注释时引入不必要依赖
-        from .comment_annotator import CommentAnnotator, AnnotatorConfig
+        from .comment_annotator import CommentAnnotator, AnnotatorConfig, get_default_backend
 
-        t0 = time.perf_counter()
-        annotator = CommentAnnotator(backend=config.llm_backend)
+        # 若未显式指定后端，自动按优先级选择（DashScope > Anthropic > OpenAI > Mock）
+        backend = config.llm_backend or get_default_backend(verbose=True)
+
+        t0        = time.perf_counter()
+        annotator = CommentAnnotator(backend=backend)
         ann_cfg   = config.annotation_config or AnnotatorConfig()
         result    = annotator.annotate(graph, config=ann_cfg)
         elapsed   = time.perf_counter() - t0

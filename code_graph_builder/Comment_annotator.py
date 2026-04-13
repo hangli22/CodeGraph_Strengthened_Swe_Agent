@@ -44,7 +44,7 @@ comment_annotator.py — LLM 驱动的代码注释生成模块
 
 阿里云 DashScope 配置
 ---------------------
-  接口地址 : https://ws-s76npq0ctcwdkc1l.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+  接口地址 : https://dashscope.aliyuncs.com/compatible-mode/v1  （公共节点，国内直连）
   环境变量 : DASHSCOPE_API_KEY
   默认模型 : qwen-plus（综合性价比最优）
   可选模型 : qwen-turbo（更快）/ qwen-max（更强）
@@ -213,48 +213,49 @@ class DashScopeBackend(LLMBackend):
     """
     阿里云百炼 DashScope 后端（OpenAI 兼容接口）。★ 默认优先使用
 
-    使用你的阿里云工作空间的 OpenAI 兼容接入点，无需额外安装任何依赖。
+    使用阿里云百炼的公共接入点，无需额外安装任何依赖。
     API Key 从环境变量 DASHSCOPE_API_KEY 读取，或在构造时传入。
 
-    接入点 : https://ws-s76npq0ctcwdkc1l.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
-    文档   : https://help.aliyun.com/zh/model-studio/
+    获取 API Key : https://bailian.console.aliyun.com/ → 密钥管理 → 创建 API Key
+    接入点文档   : https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope
+    公共接入点   : https://dashscope.aliyuncs.com/compatible-mode/v1  （北京，国内直连）
 
     Usage
     -----
     # 方式一：自动读取环境变量 DASHSCOPE_API_KEY
     backend = DashScopeBackend()
 
-    # 方式二：显式传入
-    backend = DashScopeBackend(api_key="sk-xxx", model="qwen-max")
+    # 方式二：显式传入，指定模型
+    backend = DashScopeBackend(api_key="sk-xxx", model="qwen-coder-plus")
 
-    可选模型
-    --------
-    qwen-plus   : 综合性价比最优（默认）
-    qwen-turbo  : 响应最快，适合大批量标注
-    qwen-max    : 能力最强，适合复杂代码
-    qwen-long   : 超长上下文，适合大文件
+    可选模型（代码理解场景推荐）
+    ----------------------------
+    qwen-plus        : 综合性价比最优（默认）
+    qwen-coder-plus  : 专为代码优化，注释质量更好（推荐用于本项目）
+    qwen-turbo       : 响应最快，适合大批量标注
+    qwen-max         : 能力最强，适合复杂代码
+    qwen-long        : 超长上下文，适合大文件
     """
 
-    # 你的工作空间 OpenAI 兼容接入点
-    API_URL = (
-        "https://ws-s76npq0ctcwdkc1l.cn-beijing.maas.aliyuncs.com"
-        "/compatible-mode/v1/chat/completions"
-    )
-    MODEL = "qwen-plus"
+    # 阿里云百炼公共接入点（北京地域，国内直连，无需特殊网络）
+    # 参考文档：https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope
+    API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    MODEL   = "qwen-plus"
 
     def __init__(
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
-        timeout: int = 60,   # 阿里云国内节点延迟通常在 5~15s，给足余量
+        timeout: int = 60,
     ):
         import os
         self.api_key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
         if not self.api_key:
             raise ValueError(
                 "未找到阿里云 DashScope API Key。\n"
-                "请设置环境变量 DASHSCOPE_API_KEY=sk-xxx，\n"
-                "或在构造时传入 DashScopeBackend(api_key='sk-xxx')"
+                "请前往 https://bailian.console.aliyun.com/ 创建 API Key，\n"
+                "然后设置环境变量: DASHSCOPE_API_KEY=sk-xxx\n"
+                "或在构造时传入: DashScopeBackend(api_key='sk-xxx')"
             )
         self.model   = model or self.MODEL
         self.timeout = timeout
@@ -285,8 +286,6 @@ class DashScopeBackend(LLMBackend):
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"DashScope API 错误 {e.code}: {body}") from e
-
-
 def get_default_backend(verbose: bool = True) -> LLMBackend:
     """
     按优先级自动选择可用的 LLM 后端。
