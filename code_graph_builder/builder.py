@@ -64,7 +64,7 @@ class BuildConfig:
     enable_ast_relations:  bool = True
     enable_call_graph:     bool = True
     enable_inheritance:    bool = True
-    enable_annotation:     bool = False        # 默认关闭，避免无意中消耗 API
+    enable_annotation:     bool = True        # 默认关闭，避免无意中消耗 API
     llm_backend:           object = None       # LLMBackend 实例，避免循环 import
     annotation_config:     object = None       # AnnotatorConfig 实例
     exclude_dirs:          Set[str] = field(default_factory=set)

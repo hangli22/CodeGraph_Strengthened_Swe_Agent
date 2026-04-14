@@ -1,27 +1,17 @@
 """
 test_comment_annotator.py — 注释生成模块测试
-=============================================
-使用 MockBackend 验证完整流程，不消耗真实 API。
 
-测试覆盖：
-  1. comment 字段初始为空
-  2. MockBackend 正确触发并填充 comment
-  3. 注释内容写回节点且持久化到图结构
-  4. skip_if_exists 断点续传逻辑
-  5. annotate_nodes 增量标注接口
-  6. enable_annotation=True 时 build() 集成路径
-  7. enable_annotation=True 但 llm_backend=None 时的警告路径
-  8. 序列化后 comment 字段不丢失
-  9. 只标注指定类型（跳过 MODULE）
-  10. 真实 API 调用示例（需要 ANTHROPIC_API_KEY，可选跑）
+测试分层设计
+------------
+  build_graph_no_annotation()   → 纯结构图，comment 全空
+  build_graph_with_annotation() → 带真实注释的图（DashScope 或 MockBackend）
+
+  为什么分开：
+    结构测试需要"控制变量"——先有空白状态，再施加操作，才能验证操作效果。
+    就像做实验需要对照组。
 """
-
 from __future__ import annotations
-
-import os
-import sys
-import tempfile
-import textwrap
+import os, sys, tempfile, textwrap
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,379 +23,291 @@ from code_graph_builder import (
 )
 from code_graph_builder.builder import BuildConfig
 
-# ---------------------------------------------------------------------------
-# 测试仓库（复用之前的黄金标准仓库）
-# ---------------------------------------------------------------------------
-
 MOCK_REPO = {
     "base.py": textwrap.dedent("""\
         class Animal:
             def speak(self):
                 pass
-
             def breathe(self):
                 pass
-
         def create_animal(name):
             return Animal()
     """),
     "dog.py": textwrap.dedent("""\
         from base import Animal
-
         class Dog(Animal):
             def speak(self):
                 bark()
-
             def fetch(self, item):
                 return item
-
         def bark():
             pass
     """),
 }
 
+# ===========================================================================
+# 两种图工厂 —— 测试分层的核心
+# ===========================================================================
 
-def build_test_graph(tmp_dir: str) -> CodeGraph:
+def build_graph_no_annotation(tmp_dir: str) -> CodeGraph:
+    """纯结构图：comment 全空，行为不依赖环境变量。用于 PART A。"""
     for rel, content in MOCK_REPO.items():
         Path(os.path.join(tmp_dir, rel)).write_text(content, encoding="utf-8")
-    return CodeGraphBuilder(tmp_dir).build()
+    return CodeGraphBuilder(tmp_dir).build(config=BuildConfig(enable_annotation=False))
 
 
-# ---------------------------------------------------------------------------
-# 测试函数
-# ---------------------------------------------------------------------------
-
-def test_comment_field_initially_empty(graph: CodeGraph) -> None:
-    print("\n[TEST 1] comment 字段初始为空")
-    for node in graph.iter_nodes():
-        assert node.comment == "", \
-            f"节点 {node.id} 的 comment 初始不为空: '{node.comment}'"
-    print("  ✓ 所有节点 comment 字段初始为空")
-
-
-def test_mock_backend_fills_comment(graph: CodeGraph) -> None:
-    print("\n[TEST 2] MockBackend 填充 comment 字段")
-    annotator = CommentAnnotator(MockBackend())
-    result = annotator.annotate(graph)
-
-    assert result.succeeded > 0, "应有成功标注的节点"
-    assert result.failed == 0,   f"不应有失败节点，实际 {result.failed} 个"
-
-    # 检查每个非 MODULE 的有 code_text 的节点都有了注释
-    for node in graph.iter_nodes():
-        if node.type != NodeType.MODULE and node.code_text.strip():
-            assert node.comment, f"节点 {node.id} 的 comment 仍为空"
-            assert "[功能]" in node.comment or "Mock" in node.comment, \
-                f"节点 {node.id} 的注释格式异常: {node.comment[:60]}"
-
-    print(f"  ✓ 成功标注 {result.succeeded} 个节点")
-    print(f"  样本注释（Dog.speak）: {graph.get_node('dog.py::Dog.speak').comment[:80]}")
-
-
-def test_comment_written_to_graph_internal(graph: CodeGraph) -> None:
-    print("\n[TEST 3] comment 写入 NetworkX 内部图结构")
-    for node in graph.iter_nodes():
-        if node.comment:
-            # 验证 _g 内部属性与 CodeNode 对象一致
-            internal = graph._g.nodes[node.id].get("comment", "")
-            assert internal == node.comment, \
-                f"{node.id}: CodeNode.comment 与内部图属性不一致"
-    print("  ✓ NetworkX 内部节点属性与 CodeNode 对象同步")
-
-
-def test_skip_if_exists(graph: CodeGraph) -> None:
-    print("\n[TEST 4] skip_if_exists 断点续传")
-    # 先手动给一个节点设置注释
-    target_id = "dog.py::bark"
-    target = graph.get_node(target_id)
-    target.comment = "手动设置的注释，不应被覆盖"
-    graph._g.nodes[target_id]["comment"] = target.comment
-
-    cfg = AnnotatorConfig(skip_if_exists=True)
-    annotator = CommentAnnotator(MockBackend())
-    annotator.annotate(graph, config=cfg)
-
-    # 验证手动注释没有被覆盖
-    assert graph.get_node(target_id).comment == "手动设置的注释，不应被覆盖", \
-        "skip_if_exists=True 时不应覆盖已有注释"
-    print(f"  ✓ skip_if_exists 有效，已有注释的节点被跳过")
-
-
-def test_annotate_nodes_partial(graph: CodeGraph) -> None:
-    print("\n[TEST 5] annotate_nodes 增量标注指定节点")
-    # 先清空所有注释
-    for node in graph.iter_nodes():
-        node.comment = ""
-        graph._g.nodes[node.id]["comment"] = ""
-
-    # 只标注两个节点
-    target_ids = ["base.py::Animal", "base.py::create_animal"]
-    annotator  = CommentAnnotator(MockBackend())
-    result     = annotator.annotate_nodes(graph, target_ids)
-
-    assert result.succeeded == 2, f"应成功标注 2 个节点，实际 {result.succeeded}"
-
-    for nid in target_ids:
-        assert graph.get_node(nid).comment, f"{nid} 注释仍为空"
-    # 其他节点应该仍然为空
-    for node in graph.iter_nodes():
-        if node.id not in target_ids and node.type != NodeType.MODULE:
-            assert node.comment == "", \
-                f"未指定节点 {node.id} 不应被标注，但 comment='{node.comment[:30]}'"
-
-    print(f"  ✓ 只标注了指定的 {len(target_ids)} 个节点")
-
-
-def test_build_with_annotation_integration(tmp_dir: str) -> None:
-    print("\n[TEST 6] build() 集成路径：enable_annotation=True")
+def build_graph_with_annotation(tmp_dir: str, backend=None) -> CodeGraph:
+    """带注释的图：调用真实后端。backend=None 时自动选择。用于 PART B。"""
     for rel, content in MOCK_REPO.items():
         Path(os.path.join(tmp_dir, rel)).write_text(content, encoding="utf-8")
-
-    cfg = BuildConfig(
-        enable_annotation=True,
-        llm_backend=MockBackend(),
+    return CodeGraphBuilder(tmp_dir).build(
+        config=BuildConfig(enable_annotation=True, llm_backend=backend)
     )
-    graph = CodeGraphBuilder(tmp_dir).build(config=cfg)
 
-    annotated = sum(
-        1 for n in graph.iter_nodes()
-        if n.comment and n.type != NodeType.MODULE
-    )
-    assert annotated > 0, "build() 集成路径应产生注释"
-    print(f"  ✓ build() 集成路径正常，共标注 {annotated} 个节点")
+# ===========================================================================
+# 展示工具
+# ===========================================================================
 
-    # 展示几个样本
-    for node in list(graph.iter_nodes(NodeType.METHOD))[:2]:
-        print(f"  节点: {node.qualified_name}")
-        print(f"  注释: {node.comment[:100]}")
+def print_node_detail(graph: CodeGraph, node_id: str, show_code=False) -> None:
+    from code_graph_builder import EdgeType
+    node = graph.get_node(node_id)
+    if not node:
+        return
+    print(f"\n  ┌─ {node.id}  [{node.type.value}]")
+    print(f"  │  {node.file}  L{node.start_line}~{node.end_line}")
+    # 关系
+    children  = [graph.get_node(c).name for c in graph.successors(node.id, EdgeType.PARENT_CHILD) if graph.get_node(c)]
+    callees   = [graph.get_node(c).name for c in graph.successors(node.id, EdgeType.CALLS) if graph.get_node(c)]
+    bases     = [graph.get_node(i).name for i in graph.successors(node.id, EdgeType.INHERITS) if graph.get_node(i)]
+    if children:  print(f"  │  子节点 : {', '.join(children)}")
+    if bases:     print(f"  │  继承   : {', '.join(bases)}")
+    if callees:   print(f"  │  调用   : {', '.join(callees)}")
+    # 源码
+    if show_code and node.code_text:
+        lines = node.code_text.rstrip().splitlines()
+        print(f"  │  源码   :")
+        for line in lines[:6]:
+            print(f"  │    {line}")
+        if len(lines) > 6:
+            print(f"  │    ... ({len(lines)-6} 行省略)")
+    # 注释
+    if node.comment:
+        print(f"  │  注释   :")
+        for line in node.comment.splitlines():
+            print(f"  │    {line}")
+    else:
+        print(f"  │  注释   : (空)")
+    print(f"  └{'─'*52}")
 
 
-def test_build_annotation_without_backend(tmp_dir: str) -> None:
-    print("\n[TEST 7] enable_annotation=True 且 llm_backend=None 时自动兜底 MockBackend")
-    for rel, content_ in MOCK_REPO.items():
-        Path(os.path.join(tmp_dir, rel)).write_text(content_, encoding="utf-8")
-
-    # llm_backend=None → get_default_backend() 自动选择
-    # 无任何 API Key 时降级到 MockBackend，仍然会产生注释
-    cfg = BuildConfig(enable_annotation=True, llm_backend=None)
-    graph = CodeGraphBuilder(tmp_dir).build(config=cfg)
-
+def print_graph_summary(graph: CodeGraph, title="") -> None:
+    stats = graph.stats()
     annotated = sum(1 for n in graph.iter_nodes() if n.comment)
-    # MockBackend 兜底时应仍然产生注释（Mock 注释）
-    assert annotated > 0, f"兜底 MockBackend 也应产生注释，实际 {annotated} 个"
-    print(f"  ✓ 自动兜底 MockBackend 正常运行，产生 {annotated} 个注释")
-    print("  （有真实 API Key 时会自动使用对应后端）")
+    non_mod   = sum(1 for n in graph.iter_nodes() if n.type != NodeType.MODULE)
+    print(f"\n  ── {title}")
+    print(f"  节点: {stats['total_nodes']}  边: {stats['total_edges']}  "
+          f"已标注: {annotated}/{non_mod} 个非MODULE节点")
 
+# ===========================================================================
+# PART A：结构验证（使用无注释图）
+# ===========================================================================
 
-def test_comment_survives_serialization(graph: CodeGraph, tmp_dir: str) -> None:
-    print("\n[TEST 8] 序列化/反序列化后 comment 不丢失")
-    # 先确保有注释
-    annotator = CommentAnnotator(MockBackend())
-    annotator.annotate(graph)
+def test_1_comment_initially_empty(graph):
+    print("\n[TEST 1] comment 字段初始全部为空")
+    bad = [n.id for n in graph.iter_nodes() if n.comment != ""]
+    assert not bad, f"以下节点 comment 不为空（不应该）: {bad}"
+    total = sum(1 for _ in graph.iter_nodes())
+    print(f"  ✓ 全部 {total} 个节点 comment 为空")
+    print("  说明：build_graph_no_annotation() 明确禁用了注释生成，")
+    print("        所以即使环境中有 DASHSCOPE_API_KEY 也不会触发")
 
-    pkl_path  = os.path.join(tmp_dir, "graph_with_comments.pkl")
-    json_path = os.path.join(tmp_dir, "graph_with_comments.json")
+def test_2_mock_fills_comment(graph):
+    print("\n[TEST 2] MockBackend 在干净图上填充 comment")
+    result = CommentAnnotator(MockBackend()).annotate(graph)
+    assert result.succeeded > 0 and result.failed == 0
+    print(f"  ✓ 成功标注 {result.succeeded} 个节点")
+    sample = next(n for n in graph.iter_nodes(NodeType.METHOD) if n.comment)
+    print(f"  样本: {sample.qualified_name}")
+    print(f"  注释: {sample.comment[:80]}")
 
-    graph.save_pickle(pkl_path)
-    graph.save_json(json_path)
+def test_3_networkx_sync(graph):
+    print("\n[TEST 3] comment 同步写入 NetworkX 内部")
+    bad = [n.id for n in graph.iter_nodes() if n.comment and
+           graph._g.nodes[n.id].get("comment") != n.comment]
+    assert not bad, f"不一致节点: {bad}"
+    print("  ✓ CodeNode 与 NetworkX 内部属性完全一致")
 
-    g_pkl  = CodeGraph.load_pickle(pkl_path)
-    g_json = CodeGraph.load_json(json_path)
+def test_4_skip_if_exists(graph):
+    print("\n[TEST 4] skip_if_exists 断点续传")
+    nid, sentinel = "dog.py::bark", "手动注释，不可被覆盖"
+    graph.get_node(nid).comment = sentinel
+    graph._g.nodes[nid]["comment"] = sentinel
+    CommentAnnotator(MockBackend()).annotate(graph, config=AnnotatorConfig(skip_if_exists=True))
+    assert graph.get_node(nid).comment == sentinel
+    print(f"  ✓ '{nid}' 的手动注释未被覆盖")
 
-    for node in graph.iter_nodes():
-        if not node.comment:
-            continue
-        pkl_node  = g_pkl.get_node(node.id)
-        json_node = g_json.get_node(node.id)
-        assert pkl_node  and pkl_node.comment  == node.comment, \
-            f"Pickle 恢复后 {node.id}.comment 不一致"
-        assert json_node and json_node.comment == node.comment, \
-            f"JSON 恢复后 {node.id}.comment 不一致"
+def test_5_partial_annotate(graph):
+    print("\n[TEST 5] annotate_nodes 增量标注指定节点")
+    for n in graph.iter_nodes():
+        n.comment = ""; graph._g.nodes[n.id]["comment"] = ""
+    targets = ["base.py::Animal", "base.py::create_animal"]
+    result  = CommentAnnotator(MockBackend()).annotate_nodes(graph, targets)
+    assert result.succeeded == 2
+    for nid in targets:
+        assert graph.get_node(nid).comment
+    extras = [n.id for n in graph.iter_nodes() if n.id not in targets and n.comment]
+    assert not extras, f"意外标注: {extras}"
+    print(f"  ✓ 只标注了 {len(targets)} 个指定节点，其余未被影响")
 
-    print("  ✓ Pickle 和 JSON 序列化后 comment 字段完整保留")
-
-
-def test_only_annotates_target_types(graph: CodeGraph) -> None:
-    print("\n[TEST 9] 只标注指定类型，MODULE 节点不被标注")
-    # 清空注释
-    for node in graph.iter_nodes():
-        node.comment = ""
-        graph._g.nodes[node.id]["comment"] = ""
-
-    cfg = AnnotatorConfig(
-        annotate_types={NodeType.FUNCTION}  # 只标注顶层函数
+def test_6_type_filter(graph):
+    print("\n[TEST 6] annotate_types 类型过滤")
+    for n in graph.iter_nodes():
+        n.comment = ""; graph._g.nodes[n.id]["comment"] = ""
+    CommentAnnotator(MockBackend()).annotate(
+        graph, config=AnnotatorConfig(annotate_types={NodeType.FUNCTION})
     )
-    annotator = CommentAnnotator(MockBackend())
-    annotator.annotate(graph, config=cfg)
-
     for node in graph.iter_nodes():
         if node.type == NodeType.FUNCTION and node.code_text.strip():
-            assert node.comment, f"FUNCTION 节点 {node.id} 应有注释"
+            assert node.comment, f"FUNCTION {node.id} 应有注释"
         elif node.type in (NodeType.MODULE, NodeType.CLASS, NodeType.METHOD):
-            assert node.comment == "", \
-                f"{node.type.value} 节点 {node.id} 不应有注释"
+            assert not node.comment, f"{node.type.value} {node.id} 不应有注释"
+    print("  ✓ 仅 FUNCTION 被标注，MODULE/CLASS/METHOD 均跳过")
 
-    print("  ✓ 只有 FUNCTION 节点被标注，MODULE/CLASS/METHOD 均跳过")
+def test_7_serialization(graph, tmp_dir):
+    print("\n[TEST 7] 序列化后 comment 不丢失")
+    for n in graph.iter_nodes():
+        n.comment = ""; graph._g.nodes[n.id]["comment"] = ""
+    CommentAnnotator(MockBackend()).annotate(graph)
+    pkl = os.path.join(tmp_dir, "g.pkl")
+    jsn = os.path.join(tmp_dir, "g.json")
+    graph.save_pickle(pkl); graph.save_json(jsn)
+    g2, g3 = CodeGraph.load_pickle(pkl), CodeGraph.load_json(jsn)
+    bad = [n.id for n in graph.iter_nodes() if n.comment and
+           (g2.get_node(n.id).comment != n.comment or
+            g3.get_node(n.id).comment != n.comment)]
+    assert not bad, f"序列化后不一致: {bad}"
+    print("  ✓ Pickle 和 JSON 序列化后 comment 完整保留")
 
+# ===========================================================================
+# PART B：内容展示（使用真实后端，输出节点详情）
+# ===========================================================================
 
-def test_dashscope_backend_real() -> None:
-    """
-    可选测试：真实阿里云 DashScope API 调用。
-    需要设置环境变量 DASHSCOPE_API_KEY。
-    """
-    api_key = os.environ.get("DASHSCOPE_API_KEY", "")
-    if not api_key:
-        print("\n[TEST 10-DS] DashScope 真实 API 测试（跳过：未设置 DASHSCOPE_API_KEY）")
-        return
-
-    print("\n[TEST 10-DS] 真实 DashScope API 调用（阿里云）")
-    with tempfile.TemporaryDirectory() as tmp:
-        for rel, content_ in MOCK_REPO.items():
-            Path(os.path.join(tmp, rel)).write_text(content_, encoding="utf-8")
-        graph = CodeGraphBuilder(tmp).build()
-
-    target_id = "dog.py::bark"
-    backend   = DashScopeBackend(api_key=api_key)
-    annotator = CommentAnnotator(backend)
-    result    = annotator.annotate_nodes(graph, [target_id])
-
-    assert result.succeeded == 1, f"DashScope API 调用失败: {result}"
-    node = graph.get_node(target_id)
-    assert node.comment and "[注释生成失败]" not in node.comment
-    print(f"  ✓ DashScope API 调用成功，模型: {backend.model}")
-    print(f"  节点: {target_id}")
-    print(f"  注释:\n{node.comment}")
-
-
-def test_get_default_backend_priority() -> None:
-    """
-    验证 get_default_backend() 按优先级选择后端：
-    有 DASHSCOPE_API_KEY 时返回 DashScopeBackend，否则降级。
-    """
-    print("\n[TEST 11] get_default_backend 优先级验证")
-    import os
-
-    dashscope_key = os.environ.get("DASHSCOPE_API_KEY", "")
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-
+def test_8_show_real_annotation(tmp_dir):
+    print("\n[TEST 8] 真实后端注释内容展示")
     backend = get_default_backend(verbose=False)
-
-    if dashscope_key:
-        assert isinstance(backend, DashScopeBackend), \
-            f"有 DASHSCOPE_API_KEY 时应返回 DashScopeBackend，实际: {type(backend).__name__}"
-        print(f"  ✓ 正确选择 DashScopeBackend（DASHSCOPE_API_KEY 已设置）")
-    elif anthropic_key:
-        from code_graph_builder import AnthropicBackend
-        assert isinstance(backend, AnthropicBackend), \
-            f"无 DashScope Key 时应返回 AnthropicBackend，实际: {type(backend).__name__}"
-        print(f"  ✓ 正确降级到 AnthropicBackend")
+    bname   = type(backend).__name__
+    print(f"  使用后端: {bname}", end="")
+    if isinstance(backend, DashScopeBackend):
+        print(f"  模型: {backend.model}  接入点: {backend.API_URL}")
+    elif isinstance(backend, MockBackend):
+        print("  （无 API Key，用 Mock 演示格式）")
     else:
-        assert isinstance(backend, MockBackend), \
-            f"无任何 Key 时应返回 MockBackend，实际: {type(backend).__name__}"
-        print(f"  ✓ 正确降级到 MockBackend（无任何 API Key）")
+        print()
 
+    graph = build_graph_with_annotation(tmp_dir, backend=backend)
+    print_graph_summary(graph, f"图统计（后端: {bname}）")
 
-def test_dashscope_build_integration() -> None:
-    """
-    验证 BuildConfig 中 enable_annotation=True 且有 DASHSCOPE_API_KEY 时
-    build() 能自动选择 DashScopeBackend。
-    （无 Key 时用 MockBackend 兜底，也能跑通）
-    """
-    print("\n[TEST 12] build() 自动选择 DashScope 后端集成")
-    with tempfile.TemporaryDirectory() as tmp:
-        for rel, c in MOCK_REPO.items():
-            Path(os.path.join(tmp, rel)).write_text(c, encoding="utf-8")
+    print("\n  【各类型节点示例（含注释）】")
+    shown = {NodeType.CLASS: False, NodeType.FUNCTION: False, NodeType.METHOD: False}
+    for node in graph.iter_nodes():
+        if node.type in shown and not shown[node.type] and node.comment:
+            print_node_detail(graph, node.id, show_code=True)
+            shown[node.type] = True
+        if all(shown.values()):
+            break
 
-        # llm_backend=None → 自动调用 get_default_backend()
-        cfg   = BuildConfig(enable_annotation=True, llm_backend=None)
-        graph = CodeGraphBuilder(tmp).build(config=cfg)
+    assert sum(1 for n in graph.iter_nodes() if n.comment) > 0
+    print(f"  ✓ 注释生成成功")
 
+def test_9_full_node_output(tmp_dir):
+    print("\n[TEST 9] build() 一键集成 —— 全部节点详情输出")
+    backend = get_default_backend(verbose=False)
+    bname   = type(backend).__name__
+
+    for rel, content in MOCK_REPO.items():
+        Path(os.path.join(tmp_dir, rel)).write_text(content, encoding="utf-8")
+    graph = CodeGraphBuilder(tmp_dir).build(
+        config=BuildConfig(enable_annotation=True, llm_backend=backend)
+    )
+    print_graph_summary(graph, f"build() 完成（后端: {bname}）")
+
+    for node_type in (NodeType.CLASS, NodeType.FUNCTION, NodeType.METHOD):
+        nodes = list(graph.iter_nodes(node_type))
+        if nodes:
+            print(f"\n  ── {node_type.value}（{len(nodes)} 个）──")
+            for node in nodes:
+                print_node_detail(graph, node.id, show_code=True)
+
+    assert sum(1 for n in graph.iter_nodes() if n.comment) > 0
+    print(f"  ✓ 完整节点输出展示完成")
+
+# ===========================================================================
+# PART C：优先级与集成
+# ===========================================================================
+
+def test_10_backend_priority():
+    print("\n[TEST 10] get_default_backend 优先级")
+    ds_key = os.environ.get("DASHSCOPE_API_KEY", "")
+    an_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    backend = get_default_backend(verbose=False)
+    bname   = type(backend).__name__
+    if ds_key:
+        assert isinstance(backend, DashScopeBackend), f"应选 DashScopeBackend，实际: {bname}"
+        print(f"  ✓ DashScopeBackend（DASHSCOPE_API_KEY 已设置）  模型: {backend.model}")
+    elif an_key:
+        from code_graph_builder import AnthropicBackend
+        assert isinstance(backend, AnthropicBackend), f"应选 AnthropicBackend，实际: {bname}"
+        print(f"  ✓ 降级到 AnthropicBackend")
+    else:
+        assert isinstance(backend, MockBackend), f"应选 MockBackend，实际: {bname}"
+        print(f"  ✓ 降级到 MockBackend（无任何 API Key）")
+
+def test_11_auto_backend(tmp_dir):
+    print("\n[TEST 11] llm_backend=None 时 build() 自动选后端")
+    for rel, content in MOCK_REPO.items():
+        Path(os.path.join(tmp_dir, rel)).write_text(content, encoding="utf-8")
+    graph = CodeGraphBuilder(tmp_dir).build(
+        config=BuildConfig(enable_annotation=True, llm_backend=None)
+    )
     annotated = sum(1 for n in graph.iter_nodes() if n.comment)
-    # 无论哪个后端，只要 enable_annotation=True 就应产生注释
-    assert annotated > 0, "build() 自动后端选择应产生注释"
-    backend_type = type(get_default_backend(verbose=False)).__name__
-    print(f"  ✓ 自动选择后端: {backend_type}，共标注 {annotated} 个节点")
+    bname = type(get_default_backend(verbose=False)).__name__
+    assert annotated > 0
+    print(f"  ✓ 后端: {bname}，标注 {annotated} 个节点")
 
+# ===========================================================================
+# 主程序
+# ===========================================================================
 
-def test_real_api_optional() -> None:
-    """
-    可选测试：真实 Anthropic API 调用。
-    需要设置环境变量 ANTHROPIC_API_KEY=sk-ant-xxx
-    跳过条件：未设置 API Key。
-    """
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        print("\n[TEST 10] 真实 API 测试（跳过：未设置 ANTHROPIC_API_KEY）")
-        return
-
-    print("\n[TEST 10] 真实 Anthropic API 调用")
-    from code_graph_builder import AnthropicBackend
-
-    with tempfile.TemporaryDirectory() as tmp:
-        for rel, content in MOCK_REPO.items():
-            Path(os.path.join(tmp, rel)).write_text(content, encoding="utf-8")
-        graph = CodeGraphBuilder(tmp).build()
-
-    # 只标注 1 个节点，节省费用
-    target_id = "dog.py::bark"
-    backend   = AnthropicBackend(api_key=api_key)
-    annotator = CommentAnnotator(backend)
-    result    = annotator.annotate_nodes(graph, [target_id])
-
-    assert result.succeeded == 1, f"真实 API 调用失败: {result}"
-    node = graph.get_node(target_id)
-    assert node.comment and "[注释生成失败]" not in node.comment, \
-        f"注释内容异常: {node.comment}"
-
-    print(f"  ✓ 真实 API 调用成功")
-    print(f"  节点: {target_id}")
-    print(f"  注释:\n{node.comment}")
-
-
-# ---------------------------------------------------------------------------
-# 主入口
-# ---------------------------------------------------------------------------
-
-def main() -> None:
+def main():
     print("=" * 60)
-    print("注释生成模块逻辑测试")
+    print("注释生成模块测试")
     print("=" * 60)
 
+    print("\n━━━ PART A：结构验证（enable_annotation=False 的干净图）━━━")
     with tempfile.TemporaryDirectory() as tmp:
-        # 建仓库、构建图（无注释）
-        graph = build_test_graph(tmp)
+        g = build_graph_no_annotation(tmp)
+        test_1_comment_initially_empty(g)
+        test_2_mock_fills_comment(g)
+        test_3_networkx_sync(g)
+        test_4_skip_if_exists(g)
+        test_5_partial_annotate(g)
+        test_6_type_filter(g)
+        test_7_serialization(g, tmp)
 
-        test_comment_field_initially_empty(graph)
-        test_mock_backend_fills_comment(graph)
-        test_comment_written_to_graph_internal(graph)
-        test_skip_if_exists(graph)
-        test_annotate_nodes_partial(graph)
+    print("\n━━━ PART B：内容展示（真实后端）━━━")
+    with tempfile.TemporaryDirectory() as tmp:
+        test_8_show_real_annotation(tmp)
+    with tempfile.TemporaryDirectory() as tmp:
+        test_9_full_node_output(tmp)
 
-    # 重建图（上面测试改动了 comment，需要干净的图）
-    with tempfile.TemporaryDirectory() as tmp2:
-        graph2 = build_test_graph(tmp2)
-        test_build_with_annotation_integration(tmp2)
-
-    with tempfile.TemporaryDirectory() as tmp3:
-        test_build_annotation_without_backend(tmp3)
-
-    with tempfile.TemporaryDirectory() as tmp4:
-        graph4 = build_test_graph(tmp4)
-        test_comment_survives_serialization(graph4, tmp4)
-
-    with tempfile.TemporaryDirectory() as tmp5:
-        graph5 = build_test_graph(tmp5)
-        test_only_annotates_target_types(graph5)
-
-    test_dashscope_backend_real()
-    test_get_default_backend_priority()
-    test_dashscope_build_integration()
-    test_real_api_optional()
+    print("\n━━━ PART C：优先级与集成 ━━━")
+    test_10_backend_priority()
+    with tempfile.TemporaryDirectory() as tmp:
+        test_11_auto_backend(tmp)
 
     print("\n" + "=" * 60)
     print("全部测试通过 ✓")
     print("=" * 60)
-
 
 if __name__ == "__main__":
     main()
