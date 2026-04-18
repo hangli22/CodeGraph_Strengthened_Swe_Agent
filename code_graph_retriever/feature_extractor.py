@@ -176,10 +176,10 @@ class FeatureExtractor:
 
             # 构建结构位置对象
             caller_names = [
-                graph.get_node(c).name for c in callers[:5] if graph.get_node(c)
+                graph.get_node(c).name for c in callers[:10] if graph.get_node(c)
             ]
             callee_names = [
-                graph.get_node(c).name for c in callees[:5] if graph.get_node(c)
+                graph.get_node(c).name for c in callees[:10] if graph.get_node(c)
             ]
             self._positions[nid] = StructuralPosition(
                 call_in_degree  = in_deg,
@@ -289,3 +289,4 @@ class FeatureExtractor:
             and not l.strip().startswith("'''")
         ]
         return len(body_lines) == 1 and body_lines[0] in ("pass", "...")
+    

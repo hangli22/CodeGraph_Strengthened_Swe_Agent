@@ -146,3 +146,4 @@ class RetrievalResponse:
     def __repr__(self) -> str:
         return (f"RetrievalResponse(query={self.query!r}, "
                 f"results={len(self.results)}, elapsed={self.elapsed_ms:.1f}ms)")
+    

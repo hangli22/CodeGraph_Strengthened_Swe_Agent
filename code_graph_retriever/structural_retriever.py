@@ -134,6 +134,7 @@ class StructuralRetriever:
 
         query_node = self.graph.get_node(node_id)
         query_text = query_node.qualified_name if query_node else node_id
+        # 这里的query_text为什么要等于qualified_name
 
         results = self._search(
             vec, query_text=query_text,
@@ -178,6 +179,8 @@ class StructuralRetriever:
         if not self._built:
             self.build()
 
+
+# query_text并没有被用到
     def _search(
         self,
         query_vec:     np.ndarray,
@@ -236,6 +239,7 @@ class StructuralRetriever:
 
         return results
 
+# 这里需要修改，改成LLM解释
     @staticmethod
     def _explain_structural_match(
         query_vec: np.ndarray,

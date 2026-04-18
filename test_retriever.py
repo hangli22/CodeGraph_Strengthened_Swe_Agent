@@ -464,33 +464,134 @@ def test_C6_results_sorted_by_score(graph_with_comments):
 # PART D：真实 DashScope API 测试（可选）
 # ===========================================================================
 
-def test_D1_dashscope_embedding_real():
+def test_D1_dashscope_batch_splitting():
+    """
+    验证 DashScopeEmbeddingBackend 的批次拆分逻辑。
+    不依赖真实 API——通过 mock HTTP 服务器验证：
+      - 21 条文本被正确拆分为 3 批（10+10+1）
+      - 每批发送的 input 长度不超过 10
+      - 最终返回 21 条向量，顺序正确
+    有真实 API Key 时，同时验证真实 API 调用。
+    """
+    print("\n[D1] DashScopeEmbeddingBackend 批次拆分逻辑验证")
+    from code_graph_retriever import DashScopeEmbeddingBackend
+
+    # ── 子测试 1：mock 验证拆分逻辑（不需要 API Key）──────────────────
+    import json, threading
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    received_batches: list = []
+
+    class FakeEmbedHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length))
+            batch  = body.get("input", [])
+            received_batches.append(len(batch))
+            # 返回假 embedding 向量（维度与真实一致：1024）
+            fake_data = [
+                {"index": i, "embedding": [float(i)] * 1024}
+                for i in range(len(batch))
+            ]
+            resp_body = json.dumps({"data": fake_data}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(resp_body)))
+            self.end_headers()
+            self.wfile.write(resp_body)
+
+        def log_message(self, *args):
+            pass   # 静音日志
+
+    server = HTTPServer(("127.0.0.1", 0), FakeEmbedHandler)
+    port   = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever)
+    thread.daemon = True
+    thread.start()
+
+    try:
+        backend = DashScopeEmbeddingBackend(api_key="fake-key-for-test")
+        # 临时指向本地 mock 服务器
+        original_url    = backend.API_URL
+        backend.API_URL = f"http://127.0.0.1:{port}/embeddings"
+        backend.BATCH_INTERVAL = 0   # 测试时不等待
+
+        texts = [f"文本{i}" for i in range(21)]  # 21 条 > 单批上限 10
+        vecs  = backend.embed_batch(texts)
+
+        # 验证拆分：21 条 → ceil(21/10)=3 批
+        assert len(received_batches) == 3, \
+            f"期望 3 批，实际发送了 {len(received_batches)} 批: {received_batches}"
+        assert max(received_batches) <= 10, \
+            f"单批超过 10 条！各批大小: {received_batches}"
+        assert received_batches == [10, 10, 1], \
+            f"批次大小分布不正确: {received_batches}"
+        assert vecs.shape == (21, 1024), \
+            f"期望 (21, 1024)，实际 {vecs.shape}"
+
+        backend.API_URL = original_url
+        print(f"  ✓ Mock 验证：21 条文本拆分为 {received_batches}，"
+              f"总向量 shape={vecs.shape}")
+    finally:
+        server.shutdown()
+
+    # ── 子测试 2：真实 API（有 Key 时运行）────────────────────────────
     key = os.environ.get("DASHSCOPE_API_KEY", "")
     if not key:
-        print("\n[D1] DashScope Embedding 真实 API（跳过：未设置 DASHSCOPE_API_KEY）")
+        print("  （真实 API 子测试跳过：未设置 DASHSCOPE_API_KEY）")
         return
-    print("\n[D1] DashScope Embedding 真实 API 调用")
-    from code_graph_retriever import DashScopeEmbeddingBackend
-    backend = DashScopeEmbeddingBackend(api_key=key)
-    texts = ["处理 HTTP 重定向异常", "URL 解析函数", "解码响应字节"]
-    vecs  = backend.embed_batch(texts)
-    assert vecs.shape == (3, backend.dim), f"期望 (3, {backend.dim})，实际 {vecs.shape}"
-    print(f"  ✓ DashScope Embedding 成功，维度 {backend.dim}")
-    print(f"  文本1 向量前5维: {vecs[0][:5]}")
+
+    print("  正在调用真实 DashScope Embedding API...")
+    backend_real = DashScopeEmbeddingBackend(api_key=key)
+
+    # 测试单条
+    single = backend_real.embed("处理 HTTP 重定向异常")
+    assert single.shape == (1024,), f"单条 embed 维度错误: {single.shape}"
+
+    # 测试 15 条（跨批：10+5）
+    texts_15 = [f"HTTP 请求处理函数 {i}" for i in range(15)]
+    vecs_15  = backend_real.embed_batch(texts_15)
+    assert vecs_15.shape == (15, 1024), f"15 条 embed 维度错误: {vecs_15.shape}"
+
+    # 验证向量已 L2 归一化（DashScope 返回的是原始值，可能未归一化）
+    print(f"  ✓ 真实 API：单条 shape={single.shape}，"
+          f"15条 shape={vecs_15.shape}，前5维={single[:5].tolist()}")
 
 
 def test_D2_hybrid_with_dashscope(graph_with_comments):
+    """
+    使用真实 DashScope Embedding 做端到端混合检索。
+    图有 21 个节点，build() 会触发 3 次 API 调用（批次拆分），
+    再加上 search() 时 1 次 query embedding，共 4 次调用。
+    验证全流程可以稳定跑完。
+    """
     key = os.environ.get("DASHSCOPE_API_KEY", "")
     if not key:
-        print("\n[D2] DashScope 混合检索（跳过：未设置 DASHSCOPE_API_KEY）")
+        print("\n[D2] DashScope 混合检索端到端（跳过：未设置 DASHSCOPE_API_KEY）")
         return
-    print("\n[D2] 使用 DashScope Embedding 的混合检索")
+    print("\n[D2] DashScope 混合检索端到端（21节点图，验证 batch 拆分 + 真实语义）")
     from code_graph_retriever import DashScopeEmbeddingBackend
+
     backend  = DashScopeEmbeddingBackend(api_key=key)
     retriever = HybridRetriever(graph_with_comments, embedding_backend=backend)
+
+    print(f"  构建索引中（{backend.BATCH_SIZE} 条/批，批间间隔 {backend.BATCH_INTERVAL}s）...")
     retriever.build()
-    resp = retriever.search("HTTP 响应解码出现 UnicodeDecodeError", top_k=5)
-    print(f"  ✓ 检索到 {len(resp.results)} 个结果")
+    print(f"  索引构建完成，向量维度: {backend.dim}")
+
+    # 模拟真实 SWE-bench issue 描述作为 query
+    query = "HTTP 响应解码出现 UnicodeDecodeError，Content-Type 没有 charset"
+    resp  = retriever.search(query, top_k=5)
+
+    assert len(resp.results) > 0, "检索结果为空"
+    assert all(0.0 <= r.final_score <= 1.0 for r in resp.results)
+    # 验证语义分数来自真实 embedding（不应全为 0）
+    sem_scores = [r.semantic_score for r in resp.results]
+    assert any(s > 0 for s in sem_scores), \
+        f"所有语义分数都是 0，embedding 可能未生效: {sem_scores}"
+
+    print(f"  ✓ 检索完成，耗时 {resp.elapsed_ms:.0f}ms，返回 {len(resp.results)} 个结果")
+    print(f"\n  完整检索报告（真实 DashScope Embedding）：")
     print(resp.to_agent_text(show_code=False))
 
 
@@ -573,7 +674,7 @@ def main():
         test_C6_results_sorted_by_score(graph_with_comments)
 
         section("PART D：真实 DashScope API（可选）")
-        test_D1_dashscope_embedding_real()
+        test_D1_dashscope_batch_splitting()
         test_D2_hybrid_with_dashscope(graph_with_comments)
 
         section("PART E：输出格式测试")

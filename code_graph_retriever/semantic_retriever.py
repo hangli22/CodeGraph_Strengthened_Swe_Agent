@@ -95,61 +95,140 @@ class DashScopeEmbeddingBackend(EmbeddingBackend):
 
     特性：
     - 向量维度 1024（text-embedding-v3 默认）
-    - 支持批量请求（每批最多 25 条）
+    - 每批最多 10 条（API 硬限制，超出返回 400）
+    - 自动分批：节点数量不限，内部按 BATCH_SIZE 拆分循环调用
+    - 批间限流间隔：避免触发 RPM 限制
+    - 失败自动重试：网络抖动时最多重试 3 次
+    - 文本长度截断：单条超过 MAX_TEXT_CHARS 时截断，避免 token 超限
     - 无需安装额外包，使用标准库 urllib
     """
 
-    API_URL   = "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
-    MODEL     = "text-embedding-v3"
-    EMBED_DIM = 1024
-    BATCH_SIZE = 25   # API 限制每次最多 25 条
+    API_URL       = "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
+    MODEL         = "text-embedding-v3"
+    EMBED_DIM     = 1024
+    BATCH_SIZE    = 10     # DashScope text-embedding-v3 单次最多 10 条（硬限制）
+    MAX_TEXT_CHARS = 2000  # 单条文本最大字符数，超出截断（约 500 tokens，留余量）
+    BATCH_INTERVAL = 0.2   # 批次间等待秒数，避免触发 RPM 限制（默认 60 RPM）
+    MAX_RETRIES   = 3      # 单批次失败时的最大重试次数
+    RETRY_DELAY   = 1.0    # 重试等待秒数（指数退避基数）
 
-    def __init__(self, api_key: Optional[str] = None, timeout: int = 60):
+    def __init__(
+        self,
+        api_key:    Optional[str] = None,
+        timeout:    int   = 60,
+        batch_size: Optional[int] = None,
+    ):
+        """
+        Parameters
+        ----------
+        api_key    : DashScope API Key，默认读取环境变量 DASHSCOPE_API_KEY
+        timeout    : 单次请求超时秒数
+        batch_size : 覆盖默认 batch size（调试用，不应超过 10）
+        """
+        import time as _time
+        self._time = _time
         self.api_key = api_key or os.environ.get("DASHSCOPE_API_KEY", "")
         if not self.api_key:
             raise ValueError(
                 "未找到 DASHSCOPE_API_KEY。\n"
                 "请设置环境变量或传入 DashScopeEmbeddingBackend(api_key='sk-xxx')"
             )
-        self.timeout = timeout
+        self.timeout    = timeout
+        self.batch_size = min(batch_size or self.BATCH_SIZE, self.BATCH_SIZE)
 
     @property
     def dim(self) -> int:
         return self.EMBED_DIM
 
     def embed_batch(self, texts: List[str]) -> np.ndarray:
-        """分批调用 API，合并结果。"""
-        import json, urllib.request, urllib.error
+        """
+        批量 embedding：自动按 batch_size 拆分，加入限流间隔和重试逻辑。
+        支持任意数量的输入文本，大型仓库（数千节点）可稳定运行。
+        """
+        import json
+        import urllib.request
+        import urllib.error
 
-        results = []
-        for i in range(0, len(texts), self.BATCH_SIZE):
-            batch = texts[i: i + self.BATCH_SIZE]
-            payload = json.dumps({
-                "model": self.MODEL,
-                "input": batch,
-                "encoding_format": "float",
-            }).encode("utf-8")
+        # 文本预处理：截断过长文本
+        processed = [t[:self.MAX_TEXT_CHARS] if len(t) > self.MAX_TEXT_CHARS else t
+                     for t in texts]
 
-            req = urllib.request.Request(
-                self.API_URL,
-                data=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}",
-                },
+        results: List[List[float]] = []
+        n_batches = (len(processed) + self.batch_size - 1) // self.batch_size
+
+        for batch_idx, i in enumerate(range(0, len(processed), self.batch_size)):
+            batch = processed[i: i + self.batch_size]
+
+            # 批次间限流间隔（第一批不等待）
+            if batch_idx > 0:
+                self._time.sleep(self.BATCH_INTERVAL)
+
+            batch_vecs = self._embed_single_batch_with_retry(
+                batch, json, urllib, batch_idx, n_batches
             )
-            try:
-                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    # 按 index 排序确保顺序正确
-                    items = sorted(data["data"], key=lambda x: x["index"])
-                    batch_vecs = [item["embedding"] for item in items]
-                    results.extend(batch_vecs)
-            except urllib.error.HTTPError as e:
-                body = e.read().decode("utf-8", errors="replace")
-                raise RuntimeError(f"DashScope Embedding API 错误 {e.code}: {body}") from e
+            results.extend(batch_vecs)
 
         return np.array(results, dtype=np.float32)
+
+    def _embed_single_batch_with_retry(
+        self,
+        batch: List[str],
+        json_mod,
+        urllib_mod,
+        batch_idx: int,
+        n_batches: int,
+    ) -> List[List[float]]:
+        """带指数退避重试的单批次 embedding 调用。"""
+        import urllib.request, urllib.error
+
+        payload = json_mod.dumps({
+            "model": self.MODEL,
+            "input": batch,
+            "encoding_format": "float",
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            self.API_URL,
+            data=payload,
+            headers={
+                "Content-Type":  "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+        )
+
+        last_error: Optional[Exception] = None
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    data = json_mod.loads(resp.read().decode("utf-8"))
+                    items = sorted(data["data"], key=lambda x: x["index"])
+                    return [item["embedding"] for item in items]
+
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="replace")
+                # 400 客户端错误（如 batch size 超限）不重试，直接抛出
+                if e.code == 400:
+                    raise RuntimeError(
+                        f"DashScope Embedding API 400 错误（batch {batch_idx+1}/{n_batches}）: "
+                        f"{body}\n"
+                        f"提示：batch_size={self.batch_size}，当前批次 {len(batch)} 条"
+                    ) from e
+                # 429 限流或 5xx 服务端错误：等待后重试
+                last_error = RuntimeError(
+                    f"DashScope Embedding API {e.code} 错误（第 {attempt+1} 次）: {body}"
+                )
+                if attempt < self.MAX_RETRIES - 1:
+                    wait = self.RETRY_DELAY * (2 ** attempt)
+                    self._time.sleep(wait)
+
+            except Exception as e:
+                last_error = e
+                if attempt < self.MAX_RETRIES - 1:
+                    self._time.sleep(self.RETRY_DELAY * (2 ** attempt))
+
+        raise RuntimeError(
+            f"DashScope Embedding API 重试 {self.MAX_RETRIES} 次后仍失败"
+        ) from last_error
 
 
 class TFIDFEmbeddingBackend(EmbeddingBackend):
