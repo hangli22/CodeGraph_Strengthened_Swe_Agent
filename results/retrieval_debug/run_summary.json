@@ -1,0 +1,31 @@
+{
+  "mode": "retrieval",
+  "model_name": "openai/qwen-plus",
+  "total": 3,
+  "instances": [
+    {
+      "instance_id": "astropy__astropy-12907",
+      "exit_status": "RepoPrepFailed",
+      "error": "\u547d\u4ee4\u5931\u8d25: git clone https://github.com/astropy/astropy.git ./repos\\astropy__astropy-12907\nstdout: \nstderr: Cloning into './repos\\astropy__astropy-12907'...\nerror: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: CANCEL (err 8)\nerror: 2332 bytes of body are still expected\nfetch-pack: unexpected disconnect while reading sideband packet\nfatal: early EOF\nfatal: fetch-pack: invalid index-pack output\n"
+    },
+    {
+      "instance_id": "astropy__astropy-14182",
+      "mode": "retrieval",
+      "exit_status": "InternalServerError",
+      "n_steps": 1,
+      "cost": 0.0,
+      "elapsed_s": 1711.8,
+      "retrieval_stats": {
+        "search_structural": 0,
+        "search_semantic": 0,
+        "search_hybrid": 0
+      },
+      "has_patch": false
+    },
+    {
+      "instance_id": "astropy__astropy-14365",
+      "exit_status": "RepoPrepFailed",
+      "error": "\u547d\u4ee4\u5931\u8d25: git clone https://github.com/astropy/astropy.git ./repos\\astropy__astropy-14365\nstdout: \nstderr: Cloning into './repos\\astropy__astropy-14365'...\nfatal: unable to access 'https://github.com/astropy/astropy.git/': Recv failure: Connection was aborted\n"
+    }
+  ]
+}
