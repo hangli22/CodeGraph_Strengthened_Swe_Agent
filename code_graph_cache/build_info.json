@@ -1,0 +1,25 @@
+{
+  "status": "built",
+  "instance_id": "toy-001",
+  "repo_path": "C:\\Users\\hl-pc\\Desktop\\\u6bd5\u8bbe\\CodeAgent\\SWE-agent\\sweagent\\agent",
+  "cache_dir": ".\\code_graph_cache",
+  "graph_stats": {
+    "total_nodes": 319,
+    "total_edges": 1065,
+    "nodes_MODULE": 11,
+    "nodes_CLASS": 70,
+    "nodes_METHOD": 223,
+    "nodes_FUNCTION": 15,
+    "edges_CONTAINS": 80,
+    "edges_SIBLING": 247,
+    "edges_PARENT_CHILD": 228,
+    "edges_INHERITS": 25,
+    "edges_CALLS": 420,
+    "edges_OVERRIDES": 65
+  },
+  "n_semantic": 308,
+  "embed_dim": 1024,
+  "embed_backend": "DashScopeEmbeddingBackend",
+  "total_elapsed_s": 39.26,
+  "built_at": "2026-04-21 10:58:35"
+}

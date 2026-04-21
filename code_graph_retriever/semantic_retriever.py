@@ -86,6 +86,57 @@ class EmbeddingBackend(ABC):
         return self.embed_batch([text])[0]
 
 
+class UniAPIEmbeddingBackend(EmbeddingBackend):
+    """使用中国科技云 Uni-API embeddings 接口。"""
+
+    BASE_URL = "https://uni-api.cstcloud.cn/v1"
+    MODEL = "qwen3-embedding:8b"
+    EMBED_DIM = 4096
+    MAX_TEXT_CHARS = 2000
+
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, timeout: int = 60):
+        from openai import OpenAI
+
+        self.api_key = api_key or os.environ.get("UNI_API_KEY", "")
+        if not self.api_key:
+            raise ValueError("未找到 UNI_API_KEY")
+
+        self.model = model or self.MODEL
+        self.timeout = timeout
+        self.client = OpenAI(
+            base_url=self.BASE_URL,
+            api_key=self.api_key,
+            timeout=self.timeout,
+        )
+
+    @property
+    def dim(self) -> int:
+        return self.EMBED_DIM
+
+    def embed_batch(self, texts: List[str]) -> np.ndarray:
+        processed = [
+            t[:self.MAX_TEXT_CHARS] if len(t) > self.MAX_TEXT_CHARS else t
+            for t in texts
+            if t and t.strip()
+        ]
+        if not processed:
+            return np.zeros((0, self.dim), dtype=np.float32)
+
+        try:
+            resp = self.client.embeddings.create(
+                model=self.model,
+                input=processed,
+                encoding_format="float",
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Uni-API embedding 请求失败: model={self.model}, "
+                f"base_url={self.BASE_URL}, error={type(e).__name__}: {e}"
+            ) from e
+
+        items = sorted(resp.data, key=lambda x: x.index)
+        return np.array([item.embedding for item in items], dtype=np.float32)
+
 class DashScopeEmbeddingBackend(EmbeddingBackend):
     """
     阿里云百炼 text-embedding-v3 后端。
@@ -314,25 +365,19 @@ class MockEmbeddingBackend(EmbeddingBackend):
 
 
 def get_default_embedding_backend() -> EmbeddingBackend:
-    """
-    按优先级自动选择可用的 embedding 后端：
-    DashScope → TF-IDF（兜底）
-    """
-    key = os.environ.get("DASHSCOPE_API_KEY", "")
-    if key:
-        try:
-            backend = DashScopeEmbeddingBackend(api_key=key)
-            import logging
-            logging.getLogger(__name__).info(
-                "SemanticRetriever: 使用 DashScopeEmbeddingBackend"
-            )
-            return backend
-        except Exception:
-            pass
     import logging
-    logging.getLogger(__name__).warning(
-        "SemanticRetriever: 未找到 DASHSCOPE_API_KEY，降级为 TFIDFEmbeddingBackend"
-    )
+    logger = logging.getLogger(__name__)
+
+    dashscope_key = os.environ.get("DASHSCOPE_API_KEY", "")
+    if dashscope_key:
+        try:
+            backend = DashScopeEmbeddingBackend(api_key=dashscope_key)
+            logger.info("SemanticRetriever: 使用 DashScopeEmbeddingBackend")
+            return backend
+        except Exception as e:
+            logger.warning("DashScopeEmbeddingBackend 初始化失败，降级: %s", e)
+
+    logger.warning("SemanticRetriever: 未找到 DASHSCOPE_API_KEY，降级为 TFIDFEmbeddingBackend")
     return TFIDFEmbeddingBackend()
 
 

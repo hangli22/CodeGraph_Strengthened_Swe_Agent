@@ -148,13 +148,12 @@ def run_instance(
     model_kwargs: dict = {}
     if api_base:
         model_kwargs["api_base"] = api_base
-    # DashScope 兼容 OpenAI 接口，litellm 需要 api_key 参数
-    # 优先使用显式传入的 key，否则读取环境变量 DASHSCOPE_API_KEY
+    # Uni-API 使用 OpenAI 兼容接口，优先显式传入，否则读取 UNI_API_KEY
     if api_key:
         model_kwargs["api_key"] = api_key
-    elif os.environ.get("DASHSCOPE_API_KEY"):
-        model_kwargs["api_key"] = os.environ["DASHSCOPE_API_KEY"]
-    model_kwargs["drop_params"] = True   # 跳过不支持的参数（如 Qwen 不支持某些字段）
+    elif os.environ.get("UNI_API_KEY"):
+        model_kwargs["api_key"] = os.environ["UNI_API_KEY"]
+    model_kwargs["drop_params"] = True
 
     output_path = Path(output_dir) / f"{instance_id}.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,12 +214,12 @@ def main():
     parser.add_argument("--instance_id",       required=True)
     parser.add_argument("--problem_statement", default="",
                         help="issue 描述文本，未提供时从 stdin 读取")
-    parser.add_argument("--model_name",        default="openai/qwen-plus",
-                        help="litellm 格式的模型名，如 openai/qwen-plus 或 anthropic/claude-sonnet-4-5-20250929")
-    parser.add_argument("--api_base",          default="",
-                        help="API 接入点，如 https://dashscope.aliyuncs.com/compatible-mode/v1")
-    parser.add_argument("--api_key", default=os.environ.get("DASHSCOPE_API_KEY", ""),
-                        help="API Key，默认读取 DASHSCOPE_API_KEY 环境变量")
+    parser.add_argument("--model_name",        default="deepseek-v3:671b",
+                        help="模型名，默认使用 Uni-API 的 deepseek-v3:671b")
+    parser.add_argument("--api_base",          default="https://uni-api.cstcloud.cn/v1",
+                        help="API 接入点，默认使用中国科技云 Uni-API")
+    parser.add_argument("--api_key", default=os.environ.get("UNI_API_KEY", ""),
+                        help="API Key，默认读取 UNI_API_KEY 环境变量")
     parser.add_argument("--cache_dir",         default="/tmp/code_graph_cache")
     parser.add_argument("--output_dir",        default="./trajectories")
     parser.add_argument("--step_limit",        type=int,   default=50)

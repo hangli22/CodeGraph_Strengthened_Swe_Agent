@@ -86,7 +86,8 @@ def _load_structural_retriever():
     if os.path.exists(matrix_path) and os.path.exists(node_ids_path):
         # 从缓存加载矩阵，快速重建索引
         matrix   = np.load(matrix_path)
-        node_ids = json.loads(open(node_ids_path).read())
+        with open(node_ids_path, "r", encoding="utf-8") as f:
+            node_ids = json.load(f)
 
         extractor = FeatureExtractor(graph)
         extractor.build()   # 重建 position 信息（从图计算，很快）
@@ -116,7 +117,8 @@ def _load_semantic_retriever():
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     from code_graph_retriever.semantic_retriever import (
-        SemanticRetriever, TFIDFEmbeddingBackend, get_default_embedding_backend
+        SemanticRetriever, TFIDFEmbeddingBackend,
+        DashScopeEmbeddingBackend, get_default_embedding_backend
     )
 
     cache_dir = _get_cache_dir()
@@ -128,21 +130,29 @@ def _load_semantic_retriever():
 
     if os.path.exists(emb_path) and os.path.exists(node_ids_path):
         matrix   = np.load(emb_path)
-        node_ids = json.loads(open(node_ids_path).read())
-        texts    = json.loads(open(texts_path).read()) if os.path.exists(texts_path) else [""] * len(node_ids)
+        with open(node_ids_path, "r", encoding="utf-8") as f:
+            node_ids = json.load(f)
+        if os.path.exists(texts_path):
+            with open(texts_path, "r", encoding="utf-8") as f:
+                texts = json.load(f)
+        else:
+            texts = [""] * len(node_ids)
 
-        # 选择 embedding 后端（用于对 query 文本做 embedding）
+        # ── 选择 embedding 后端（仅用于对 query 文本做实时 embedding）──
+        backend = None
         dashscope_key = os.environ.get("DASHSCOPE_API_KEY", "")
         if dashscope_key:
-            from code_graph_retriever.semantic_retriever import DashScopeEmbeddingBackend
-            backend = DashScopeEmbeddingBackend(api_key=dashscope_key)
-            logger.info("语义检索：使用 DashScope embedding 后端")
-        else:
-            # TF-IDF 降级：需要用缓存的文本重新 fit
+            try:
+                backend = DashScopeEmbeddingBackend(api_key=dashscope_key)
+                logger.info("语义检索：使用 DashScope embedding 后端")
+            except Exception as e:
+                logger.warning("DashScope embedding 初始化失败: %s", e)
+
+        if backend is None:
             backend = TFIDFEmbeddingBackend(n_components=min(64, max(1, len(texts) - 1)))
             if texts and any(t for t in texts):
                 backend.fit(texts)
-            logger.warning("语义检索：未找到 DASHSCOPE_API_KEY，使用 TF-IDF 后端（语义质量较低）")
+            logger.warning("语义检索：降级为 TF-IDF 后端（语义质量较低）")
 
         retriever = SemanticRetriever(graph, backend=backend)
         retriever._node_ids = node_ids
@@ -154,7 +164,6 @@ def _load_semantic_retriever():
         retriever._nn.fit(matrix)
         retriever._built = True
     else:
-        # 缓存不完整，重新构建（会重新调用 API，较慢）
         logger.warning("语义 embedding 缓存不完整，重新构建（将调用 embedding API）")
         backend   = get_default_embedding_backend()
         retriever = SemanticRetriever(graph, backend=backend).build()

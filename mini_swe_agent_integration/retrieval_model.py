@@ -64,18 +64,26 @@ class RetrievalModel(LitellmModel):
         super().__init__(config_class=config_class, **kwargs)
 
     def _query(self, messages: list[dict], **kwargs):
-        """调用 LLM API，在 tools 列表中追加检索工具。"""
+        import os
         import litellm
-        try:
-            return litellm.completion(
-                model=self.config.model_name,
-                messages=messages,
-                tools=[BASH_TOOL] + RETRIEVAL_TOOLS,   # ← 核心修改
-                **(self.config.model_kwargs | kwargs),
-            )
-        except litellm.exceptions.AuthenticationError as e:
-            e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
-            raise e
+        model_kwargs = self.config.model_kwargs | kwargs
+        api_base = model_kwargs.get("api_base") or "https://uni-api.cstcloud.cn/v1"
+        api_key = model_kwargs.get("api_key") or os.environ.get("UNI_API_KEY", "")
+        model_name = self.config.model_name
+
+        if not model_name.startswith("openai/"):
+            model_name = f"openai/{model_name}"
+
+        return litellm.completion(
+            model=model_name,
+            api_base=api_base,
+            api_key=api_key,
+            messages=messages,
+            tools=[BASH_TOOL] + RETRIEVAL_TOOLS,
+            tool_choice=model_kwargs.get("tool_choice", "auto"),
+            temperature=model_kwargs.get("temperature", 0.0),
+            max_tokens=model_kwargs.get("max_tokens"),
+        )
 
     def _parse_actions(self, response) -> list[dict]:
         """

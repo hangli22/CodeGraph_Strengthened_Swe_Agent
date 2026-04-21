@@ -23,6 +23,18 @@ python mini_swe_agent_integration/run_swebench_batch.py \\
     --cache_dir ./cache \\
     --workers 1
 
+python mini_swe_agent_integration/run_swebench_batch.py `
+    --mode retrieval `
+    --model_name deepseek-v3:671b `
+    --api_base https://uni-api.cstcloud.cn/v1 `
+    --subset lite `
+    --split test `
+    --slice 0:5 `
+    --output_dir ./results/retrieval `
+    --repos_dir ./repos `
+    --cache_dir ./cache `
+    --workers 1
+
 # Baseline 组（裸 mini-swe-agent，完全相同参数）
 python mini_swe_agent_integration/run_swebench_batch.py \\
     --mode baseline \\
@@ -39,17 +51,17 @@ python mini_swe_agent_integration/run_swebench_batch.py \\
 ------------------
 sb-cli submit swe-bench_lite test \\
     --predictions_path ./results/retrieval/preds.json \\
-    --run_id retrieval-qwen-plus-20260418
+    --run_id retrieval-deepseek-v3-20260418
 
 sb-cli submit swe-bench_lite test \\
     --predictions_path ./results/baseline/preds.json \\
-    --run_id baseline-qwen-plus-20260418
+    --run_id baseline-deepseek-v3-20260418
 
 preds.json 格式（与官方一致）
 ------------------------------
 {
   "psf__requests-1963": {
-    "model_name_or_path": "qwen-plus",
+    "model_name_or_path": "deepseek-v3:671b",
     "instance_id": "psf__requests-1963",
     "model_patch": "diff --git a/..."
   },
@@ -309,7 +321,7 @@ def process_instance(
     if api_base:
         model_kwargs["api_base"] = api_base
     # API Key：优先参数传入，其次环境变量
-    _key = api_key or os.environ.get("DASHSCOPE_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+    _key = api_key or os.environ.get("UNI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
     if _key:
         model_kwargs["api_key"] = _key
 
@@ -412,7 +424,7 @@ def load_instances(subset: str, split: str) -> list[dict]:
     dataset_path = DATASET_MAPPING.get(subset, subset)
     logger.info("加载数据集: %s (split=%s)", dataset_path, split)
     from datasets import load_dataset
-    ds = load_dataset(dataset_path, split=split, trust_remote_code=True)
+    ds = load_dataset(dataset_path, split=split)
     instances = list(ds)
     logger.info("数据集加载完成：共 %d 个 instance", len(instances))
     return instances
@@ -607,13 +619,13 @@ def main():
                         help="retrieval=实验组（带检索工具），baseline=对照组（裸mini-swe-agent）")
 
     # ── 模型 ──────────────────────────────────────────────────────────────
-    parser.add_argument("--model_name", default="openai/qwen-plus",
-                        help="litellm 格式模型名，如 openai/qwen-plus")
+    parser.add_argument("--model_name", default="deepseek-v3:671b",
+                        help="模型名，默认使用 deepseek-v3:671b")
     parser.add_argument("--api_base",
-                        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                        default="https://uni-api.cstcloud.cn/v1",
                         help="API 接入点")
     parser.add_argument("--api_key", default="",
-                        help="API Key（默认读取 DASHSCOPE_API_KEY 环境变量）")
+                        help="API Key（默认读取 UNI_API_KEY 环境变量）")
 
     # ── 数据集 ────────────────────────────────────────────────────────────
     parser.add_argument("--subset", default="lite",

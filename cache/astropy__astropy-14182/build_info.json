@@ -1,0 +1,26 @@
+{
+  "status": "built",
+  "instance_id": "astropy__astropy-14182",
+  "repo_path": "./repos\\astropy__astropy-14182",
+  "cache_dir": "./cache\\astropy__astropy-14182",
+  "graph_stats": {
+    "total_nodes": 18793,
+    "total_edges": 194397,
+    "nodes_MODULE": 931,
+    "nodes_FUNCTION": 6117,
+    "nodes_CLASS": 2098,
+    "nodes_METHOD": 9647,
+    "edges_IMPORTS": 3425,
+    "edges_CONTAINS": 7351,
+    "edges_SIBLING": 15165,
+    "edges_CALLS": 155069,
+    "edges_INHERITS": 1581,
+    "edges_PARENT_CHILD": 10511,
+    "edges_OVERRIDES": 1295
+  },
+  "n_semantic": 17862,
+  "embed_dim": 1024,
+  "embed_backend": "DashScopeEmbeddingBackend",
+  "total_elapsed_s": 2278.21,
+  "built_at": "2026-04-21 16:44:12"
+}
