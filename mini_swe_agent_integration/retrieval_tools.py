@@ -1,30 +1,17 @@
 """
-retrieval_tools.py — 检索工具实现与 Tool Schema 定义
-=====================================================
+retrieval_tools.py — 检索工具 + deepen_file 工具
+==================================================
 
-职责
-----
-1. 定义三个检索工具的 OpenAI function calling JSON schema
-   （LLM 通过这些描述决定何时调用哪个工具）
-2. 实现三个工具的 Python 函数，从磁盘缓存加载索引并执行检索
-3. 提供统一的 dispatch 入口，供 RetrievalAgent 调用
+提供给 RetrievalAgent / RetrievalModel 的工具函数：
 
-缓存目录结构（由 prebuild.py 生成）
-------------------------------------
-<cache_dir>/
-  code_graph.pkl            ← CodeGraph 对象
-  feature_matrix.npy        ← 结构特征矩阵（n_nodes × 8）
-  feature_node_ids.json     ← 结构特征矩阵的行对应 node_id 列表
-  semantic_embeddings.npy   ← embedding 向量矩阵（n_nodes × dim）
-  semantic_node_ids.json    ← embedding 矩阵的行对应 node_id 列表
-  semantic_texts.json       ← 各节点用于 embedding 的文本（调试用）
+- search_hybrid:     语义 + 结构混合检索，用自然语言 query 找相关节点
+- search_semantic:   语义检索，用自然语言 query 找相关节点
+- search_structural: 粗粒度结构关系检索，用已知 node_id 做关系扩展
+- deepen_file:       按需深化文件，补充方法级节点和调用边
 
-设计说明
---------
-- 工具函数每次调用时从磁盘加载缓存，利用 Python 进程缓存（模块级变量）
-  避免重复 IO。对 mini-swe-agent 的单进程模型，这是最简单可靠的方案。
-- 返回值是纯文本字符串，格式与 bash 命令输出完全一致，
-  这样 format_observation_messages 可以直接处理，无需任何修改。
+注意：
+当前 structural_retriever.py 已改为“基于粗粒度图关系的结构检索”，
+不再使用旧版 FeatureExtractor / feature_matrix / NearestNeighbors 结构向量检索。
 """
 
 from __future__ import annotations
@@ -33,202 +20,253 @@ import json
 import logging
 import os
 import pickle
-from typing import Optional
+from typing import Optional, List
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ===========================================================================
-# 模块级缓存（进程内复用，避免重复磁盘 IO）
-# ===========================================================================
-
-_cache: dict = {}   # key → 已加载的对象
+_cache: dict = {}
+MAX_DEEPEN_FILES = 20
 
 
 def _get_cache_dir() -> str:
     return os.environ.get("CODE_GRAPH_CACHE_DIR", "/tmp/code_graph_cache")
 
 
+def clear_retrieval_cache() -> None:
+    """
+    清空 retrieval_tools 的进程内缓存。
+
+    必须在切换 SWE-bench instance / repo / CODE_GRAPH_CACHE_DIR 后调用。
+    否则 _cache 中可能仍然保存上一个 instance 的 graph、semantic retriever、
+    structural retriever，导致新 instance 使用旧代码图。
+    """
+    n = len(_cache)
+    _cache.clear()
+    logger.info("已清空 retrieval_tools 进程内缓存：%d 项", n)
+
+
 def _load_cached(key: str, loader):
-    """懒加载：首次调用时 load，后续直接返回内存缓存。"""
     if key not in _cache:
         _cache[key] = loader()
     return _cache[key]
 
 
 def _load_graph():
+    """
+    从当前 CODE_GRAPH_CACHE_DIR 加载 CodeGraph。
+
+    注意：
+    这个函数只负责从磁盘加载；是否复用由 _load_cached 控制。
+    切换 instance 前必须调用 clear_retrieval_cache()，否则不会进入这里。
+    """
     cache_dir = _get_cache_dir()
     path = os.path.join(cache_dir, "code_graph.pkl")
+
     if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"代码图缓存不存在：{path}\n"
-            f"请先运行：python mini_swe_agent_integration/prebuild.py --repo_path /repo"
-        )
+        raise FileNotFoundError(f"代码图缓存不存在：{path}\n请先运行 prebuild.py")
+
     with open(path, "rb") as f:
-        return pickle.load(f)
+        graph = pickle.load(f)
+
+    logger.info("加载代码图: %s", path)
+    logger.info("代码图 repo_root: %s", getattr(graph, "repo_root", None))
+
+    try:
+        stats = graph.stats()
+        logger.info(
+            "代码图统计: nodes=%s edges=%s",
+            stats.get("total_nodes"),
+            stats.get("total_edges"),
+        )
+    except Exception:
+        logger.debug("读取代码图统计失败", exc_info=True)
+
+    return graph
 
 
 def _load_structural_retriever():
-    """从缓存加载结构检索器（跳过重新构建图，直接加载矩阵后 fit）。"""
+    """
+    加载粗粒度结构检索器。
+
+    当前 StructuralRetriever 已经是“基于粗粒度图关系”的实现：
+      - siblings
+      - inheritance
+      - dependencies
+      - co_dependents
+      - related
+
+    因此这里不再加载 feature_matrix.npy / feature_node_ids.json，
+    也不再使用 FeatureExtractor / NearestNeighbors。
+    """
     import sys
+
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-    from code_graph_retriever.feature_extractor import FeatureExtractor
     from code_graph_retriever.structural_retriever import StructuralRetriever
 
-    cache_dir = _get_cache_dir()
-    graph     = _load_cached("graph", _load_graph)
-
-    matrix_path   = os.path.join(cache_dir, "feature_matrix.npy")
-    node_ids_path = os.path.join(cache_dir, "feature_node_ids.json")
-
-    if os.path.exists(matrix_path) and os.path.exists(node_ids_path):
-        # 从缓存加载矩阵，快速重建索引
-        matrix   = np.load(matrix_path)
-        with open(node_ids_path, "r", encoding="utf-8") as f:
-            node_ids = json.load(f)
-
-        extractor = FeatureExtractor(graph)
-        extractor.build()   # 重建 position 信息（从图计算，很快）
-
-        retriever = StructuralRetriever(graph, extractor=extractor)
-        # 直接注入缓存的矩阵，跳过重新计算特征
-        retriever._node_ids = node_ids
-        retriever._matrix   = matrix
-        retriever._extractor = extractor
-
-        from sklearn.neighbors import NearestNeighbors
-        retriever._nn = NearestNeighbors(metric="cosine", algorithm="brute")
-        retriever._nn.fit(matrix)
-        retriever._built = True
-    else:
-        # 缓存不完整，重新构建（较慢）
-        logger.warning("结构特征缓存不完整，重新构建（这会较慢）")
-        extractor = FeatureExtractor(graph).build()
-        retriever = StructuralRetriever(graph, extractor=extractor).build()
-
+    graph = _load_cached("graph", _load_graph)
+    retriever = StructuralRetriever(graph).build()
     return retriever
 
 
 def _load_semantic_retriever():
-    """从缓存加载语义检索器（跳过重新调用 embedding API）。"""
     import sys
+
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     from code_graph_retriever.semantic_retriever import (
-        SemanticRetriever, TFIDFEmbeddingBackend,
-        DashScopeEmbeddingBackend, get_default_embedding_backend
+        SemanticRetriever,
+        TFIDFEmbeddingBackend,
+        get_default_embedding_backend,
+        DashScopeEmbeddingBackend,
     )
 
     cache_dir = _get_cache_dir()
-    graph     = _load_cached("graph", _load_graph)
-
-    emb_path      = os.path.join(cache_dir, "semantic_embeddings.npy")
+    graph = _load_cached("graph", _load_graph)
+    emb_path = os.path.join(cache_dir, "semantic_embeddings.npy")
     node_ids_path = os.path.join(cache_dir, "semantic_node_ids.json")
-    texts_path    = os.path.join(cache_dir, "semantic_texts.json")
+    texts_path = os.path.join(cache_dir, "semantic_texts.json")
 
     if os.path.exists(emb_path) and os.path.exists(node_ids_path):
-        matrix   = np.load(emb_path)
+        matrix = np.load(emb_path)
         with open(node_ids_path, "r", encoding="utf-8") as f:
             node_ids = json.load(f)
+
         if os.path.exists(texts_path):
             with open(texts_path, "r", encoding="utf-8") as f:
                 texts = json.load(f)
         else:
             texts = [""] * len(node_ids)
 
-        # ── 选择 embedding 后端（仅用于对 query 文本做实时 embedding）──
         backend = None
-        dashscope_key = os.environ.get("DASHSCOPE_API_KEY", "")
-        if dashscope_key:
+
+        ds_key = os.environ.get("DASHSCOPE_API_KEY", "")
+        if ds_key:
             try:
-                backend = DashScopeEmbeddingBackend(api_key=dashscope_key)
-                logger.info("语义检索：使用 DashScope embedding 后端")
-            except Exception as e:
-                logger.warning("DashScope embedding 初始化失败: %s", e)
+                backend = DashScopeEmbeddingBackend(api_key=ds_key)
+            except Exception:
+                logger.warning("DashScopeEmbeddingBackend 初始化失败，回退到 TFIDF", exc_info=True)
 
         if backend is None:
-            backend = TFIDFEmbeddingBackend(n_components=min(64, max(1, len(texts) - 1)))
+            backend = TFIDFEmbeddingBackend(
+                n_components=min(64, max(1, len(texts) - 1))
+            )
             if texts and any(t for t in texts):
                 backend.fit(texts)
-            logger.warning("语义检索：降级为 TF-IDF 后端（语义质量较低）")
 
         retriever = SemanticRetriever(graph, backend=backend)
         retriever._node_ids = node_ids
-        retriever._texts    = texts
-        retriever._matrix   = matrix
+        retriever._texts = texts
+        retriever._matrix = matrix
 
         from sklearn.neighbors import NearestNeighbors
+
         retriever._nn = NearestNeighbors(metric="cosine", algorithm="brute")
         retriever._nn.fit(matrix)
         retriever._built = True
     else:
-        logger.warning("语义 embedding 缓存不完整，重新构建（将调用 embedding API）")
-        backend   = get_default_embedding_backend()
+        logger.warning("语义 embedding 缓存不完整，重新构建")
+        backend = get_default_embedding_backend()
         retriever = SemanticRetriever(graph, backend=backend).build()
 
     return retriever
 
 
 # ===========================================================================
-# 三个工具函数
+# 工具函数
 # ===========================================================================
 
-def search_structural(node_id: str, top_k: int = 5) -> str:
+def search_structural(
+    node_id: str,
+    mode: str = "related",
+    top_k: int = 5,
+) -> str:
     """
-    基于代码图结构特征检索与指定节点角色相似的函数/类。
+    粗粒度结构关系检索。
 
-    参数：node_id（如 src/models.py::User.save），top_k（返回结果数）
-    返回：格式化的检索结果文本
+    输入必须是已知 node_id，而不是自然语言 query。
+
+    mode 可选：
+      - siblings
+      - inheritance
+      - dependencies
+      - co_dependents
+      - related
     """
     try:
+        import sys
+
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+        from code_graph_retriever.structural_retriever import StructuralQueryMode
+
         retriever = _load_cached("structural_retriever", _load_structural_retriever)
-        response  = retriever.search_by_node_id(node_id, top_k=top_k)
+
+        try:
+            query_mode = StructuralQueryMode(mode)
+        except ValueError:
+            valid_modes = [m.value for m in StructuralQueryMode]
+            return (
+                f"[structural_search ERROR] 无效 mode: {mode!r}\n"
+                f"可用 mode: {', '.join(valid_modes)}\n"
+                f"说明：search_structural 不是自然语言搜索工具，"
+                f"必须输入已知 node_id，并指定关系模式。"
+            )
+
+        response = retriever.search(node_id=node_id, mode=query_mode, top_k=top_k)
 
         if not response.results:
-            return (f"[structural_search] 未找到与 '{node_id}' 结构相似的节点。\n"
-                    f"（共检索 {response.total_nodes} 个节点，耗时 {response.elapsed_ms:.1f}ms）")
+            return (
+                f"[structural_search] 未找到与节点 '{node_id}' 相关的结构关系结果。\n"
+                f"关系模式: {query_mode.value}\n"
+                f"检索范围: {response.total_nodes} 个节点  "
+                f"耗时: {response.elapsed_ms:.1f}ms\n"
+                f"提示：请确认 node_id 是否来自 search_hybrid/search_semantic 的结果，"
+                f"而不是自然语言 query。"
+            )
 
         lines = [
-            f"[structural_search] 找到 {len(response.results)} 个结构相似节点",
+            f"[structural_search] 找到 {len(response.results)} 个粗粒度结构关联节点",
             f"查询节点: {node_id}",
+            f"关系模式: {query_mode.value}",
             f"检索范围: {response.total_nodes} 个节点  耗时: {response.elapsed_ms:.1f}ms",
             "=" * 60,
         ]
+
         for i, r in enumerate(response.results, 1):
             lines += [
                 f"\n[{i}] {r.qualified_name}  [{r.node_type}]",
+                f"    节点ID: {r.node_id}",
                 f"    文件: {r.file}  行: {r.start_line}~{r.end_line}",
                 f"    结构评分: {r.structural_score:.3f}",
-                f"    结构匹配依据: {r.structural_reason}",
-                f"    结构位置: {r.position_summary}",
             ]
+
+            if r.structural_reason:
+                lines.append(f"    关系依据: {r.structural_reason}")
+            if r.position_summary:
+                lines.append(f"    结构位置: {r.position_summary}")
             if r.comment:
                 lines.append(f"    功能注释: {r.comment[:120]}")
+
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"[structural_search ERROR] {e}"
     except Exception as e:
         logger.exception("structural_search 失败")
         return f"[structural_search ERROR] {type(e).__name__}: {e}"
 
 
 def search_semantic(query: str, top_k: int = 5) -> str:
-    """
-    基于自然语言语义检索功能相关的函数/类。
-
-    参数：query（自然语言描述），top_k（返回结果数）
-    返回：格式化的检索结果文本
-    """
     try:
         retriever = _load_cached("semantic_retriever", _load_semantic_retriever)
-        response  = retriever.search(query, top_k=top_k)
+        response = retriever.search(query, top_k=top_k)
 
         if not response.results:
-            return (f"[semantic_search] 未找到与 '{query}' 语义相关的节点。\n"
-                    f"（共检索 {response.total_nodes} 个节点，耗时 {response.elapsed_ms:.1f}ms）")
+            return (
+                f"[semantic_search] 未找到与 '{query}' 语义相关的节点。\n"
+                f"（共检索 {response.total_nodes} 个节点，耗时 {response.elapsed_ms:.1f}ms）"
+            )
 
         lines = [
             f"[semantic_search] 找到 {len(response.results)} 个语义相关节点",
@@ -236,19 +274,22 @@ def search_semantic(query: str, top_k: int = 5) -> str:
             f"检索范围: {response.total_nodes} 个节点  耗时: {response.elapsed_ms:.1f}ms",
             "=" * 60,
         ]
+
         for i, r in enumerate(response.results, 1):
             lines += [
                 f"\n[{i}] {r.qualified_name}  [{r.node_type}]",
+                f"    节点ID: {r.node_id}",
                 f"    文件: {r.file}  行: {r.start_line}~{r.end_line}",
                 f"    语义评分: {r.semantic_score:.3f}",
-                f"    语义关联: {r.semantic_reason}",
             ]
+
+            if r.semantic_reason:
+                lines.append(f"    语义关联: {r.semantic_reason}")
             if r.comment:
                 lines.append(f"    功能注释: {r.comment[:120]}")
+
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"[semantic_search ERROR] {e}"
     except Exception as e:
         logger.exception("semantic_search 失败")
         return f"[semantic_search ERROR] {type(e).__name__}: {e}"
@@ -256,60 +297,194 @@ def search_semantic(query: str, top_k: int = 5) -> str:
 
 def search_hybrid(query: str, top_k: int = 5) -> str:
     """
-    结合结构特征和语义相似度的混合检索（推荐优先使用）。
+    混合检索。
 
-    参数：query（自然语言描述或 issue 关键词），top_k（返回结果数）
-    返回：格式化的检索结果文本（含结构和语义双重原因分析）
+    注意：
+    当前 StructuralRetriever 已改为“已知 node_id 的关系扩展工具”。
+    因此 HybridRetriever 如果要融合结构信息，应采用：
+      natural language query -> semantic seed nodes -> structural expansion
+    的方式。
+
+    这里仍然保留原有 HybridRetriever 接入方式，前提是 hybrid_retriever.py
+    已经适配新的 StructuralRetriever.search_by_node_id() 兼容接口。
     """
     try:
         import sys
+
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-        graph             = _load_cached("graph", _load_graph)
-        struct_retriever  = _load_cached("structural_retriever", _load_structural_retriever)
-        sem_retriever     = _load_cached("semantic_retriever", _load_semantic_retriever)
+        graph = _load_cached("graph", _load_graph)
+        struct_retriever = _load_cached("structural_retriever", _load_structural_retriever)
+        sem_retriever = _load_cached("semantic_retriever", _load_semantic_retriever)
 
         from code_graph_retriever.hybrid_retriever import HybridRetriever
+
         retriever = HybridRetriever(graph)
         retriever._structural = struct_retriever
-        retriever._semantic   = sem_retriever
-        retriever._built      = True
+        retriever._semantic = sem_retriever
+        retriever._built = True
 
         response = retriever.search(query, top_k=top_k)
 
         if not response.results:
-            return (f"[hybrid_search] 未找到与 '{query}' 相关的节点。\n"
-                    f"（共检索 {response.total_nodes} 个节点，耗时 {response.elapsed_ms:.1f}ms）")
+            return (
+                f"[hybrid_search] 未找到与 '{query}' 相关的节点。\n"
+                f"（共检索 {response.total_nodes} 个节点，耗时 {response.elapsed_ms:.1f}ms）"
+            )
 
         lines = [
             f"[hybrid_search] 找到 {len(response.results)} 个相关节点",
             f"查询: {query}",
             f"检索范围: {response.total_nodes} 个节点  耗时: {response.elapsed_ms:.1f}ms",
-            f"融合权重: 结构 40% + 语义 60%",
+            f"说明: 语义检索用于定位候选节点，结构检索用于已知节点的粗粒度关系扩展",
             "=" * 60,
         ]
+
         for i, r in enumerate(response.results, 1):
             lines += [
                 f"\n[{i}] {r.qualified_name}  [{r.node_type}]",
+                f"    节点ID: {r.node_id}",
                 f"    文件: {r.file}  行: {r.start_line}~{r.end_line}",
                 f"    综合评分: {r.final_score:.3f}  "
                 f"（结构: {r.structural_score:.3f} | 语义: {r.semantic_score:.3f}）",
             ]
+
             if r.structural_reason:
-                lines.append(f"    结构匹配依据: {r.structural_reason}")
+                lines.append(f"    结构关系依据: {r.structural_reason}")
             if r.semantic_reason:
                 lines.append(f"    语义关联说明: {r.semantic_reason}")
             if r.position_summary:
                 lines.append(f"    结构位置: {r.position_summary}")
             if r.comment:
                 lines.append(f"    功能注释: {r.comment[:120]}")
+
         return "\n".join(lines)
 
-    except FileNotFoundError as e:
-        return f"[hybrid_search ERROR] {e}"
     except Exception as e:
         logger.exception("hybrid_search 失败")
         return f"[hybrid_search ERROR] {type(e).__name__}: {e}"
+
+
+def deepen_file(file_path: str) -> str:
+    """
+    按需深化文件：完整解析 AST，补充方法级节点和调用关系，更新检索索引。
+    """
+    try:
+        import sys
+        import time as _time
+
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+        graph = _load_cached("graph", _load_graph)
+        struct_ret = _load_cached("structural_retriever", _load_structural_retriever)
+        sem_ret = _load_cached("semantic_retriever", _load_semantic_retriever)
+
+        # 规范化路径
+        file_rel = file_path.lstrip("./").replace("\\", "/")
+        if "::" in file_rel:
+            file_rel = file_rel.split("::")[0]
+
+        # 前置检查
+        depth = graph.get_file_depth(file_rel)
+        if depth == "full":
+            return f"[deepen_file] 文件 {file_rel} 已是完整解析状态，无需深化。"
+        if depth == "":
+            return f"[deepen_file] 文件 {file_rel} 不在代码图中。请检查路径。"
+
+        deepened = graph.get_deepened_files()
+        if len(deepened) >= MAX_DEEPEN_FILES:
+            return (
+                f"[deepen_file] 已达到最大深化数 ({MAX_DEEPEN_FILES})，无法继续。\n"
+                f"已深化文件: {', '.join(deepened[:5])}..."
+            )
+
+        # 执行深化
+        from code_graph_builder.file_deepener import FileDeepener
+
+        deepener = FileDeepener(
+            graph=graph,
+            repo_root=graph.repo_root,
+            embedding_backend=semantic_retriever.backend,
+        )
+
+        result = deepener.deepen(
+            file_rel=file_rel,
+            issue_query=current_issue_or_query,
+            top_methods=5,
+            expand_neighbor_classes=True,
+            max_neighbor_files=3,
+        )
+
+        # 更新语义索引：为新节点计算 embedding
+        if result.new_node_ids and sem_ret.backend is not None:
+            new_texts = []
+            for nid in result.new_node_ids:
+                node = graph.get_node(nid)
+                if node:
+                    if node.comment.strip():
+                        text = node.comment.strip()
+                    elif node.signature or node.docstring:
+                        text = node.skeleton_embedding_text()
+                    else:
+                        text = node.code_text[:500].strip()
+                    new_texts.append(text or nid)
+                else:
+                    new_texts.append(nid)
+
+            try:
+                new_embeddings = sem_ret.backend.embed_batch(new_texts)
+                sem_ret.add_nodes(result.new_node_ids, new_texts, new_embeddings)
+            except Exception as e:
+                logger.warning(
+                    "新节点 embedding 失败: %s（检索仍可用，但新节点暂无语义索引）",
+                    e,
+                )
+
+        # 更新结构索引：
+        # 当前结构检索是粗粒度关系检索，不依赖旧 feature_matrix。
+        # deepen 后可能新增方法节点和 CALLS 边，因此 rebuild 可刷新 file index/import profiles。
+        if hasattr(struct_ret, "rebuild"):
+            struct_ret.rebuild()
+
+        # 生成汇总
+        remaining = MAX_DEEPEN_FILES - len(graph.get_deepened_files())
+        lines = [
+            f"[deepen_file] 文件 {file_rel} 已深化为完整解析",
+            "",
+            f"新增 {result.method_count} 个方法节点:",
+        ]
+
+        for nid in result.new_node_ids[:10]:
+            node = graph.get_node(nid)
+            if node:
+                sig = node.signature or ""
+                doc = f" — {node.docstring}" if node.docstring else ""
+                lines.append(f"  {node.name}{sig}{doc}")
+
+        if len(result.new_node_ids) > 10:
+            lines.append(f"  ... 共 {len(result.new_node_ids)} 个")
+
+        lines.append("")
+        lines.append(f"新增 {result.new_edge_count} 条关系边 (CALLS: {result.call_edge_count})")
+
+        if result.imported_files:
+            lines.append("")
+            lines.append("关联文件（可进一步深化）:")
+            for imp_file in result.imported_files[:8]:
+                lines.append(f"  - {imp_file}")
+
+        lines.append("")
+        lines.append(
+            f"深化预算: 已使用 {len(graph.get_deepened_files())}/{MAX_DEEPEN_FILES}，剩余 {remaining}"
+        )
+
+        return "\n".join(lines)
+
+    except FileNotFoundError as e:
+        return f"[deepen_file ERROR] {e}"
+    except Exception as e:
+        logger.exception("deepen_file 失败")
+        return f"[deepen_file ERROR] {type(e).__name__}: {e}"
 
 
 # ===========================================================================
@@ -318,21 +493,30 @@ def search_hybrid(query: str, top_k: int = 5) -> str:
 
 TOOL_FUNCTIONS = {
     "search_structural": search_structural,
-    "search_semantic":   search_semantic,
-    "search_hybrid":     search_hybrid,
+    "search_semantic": search_semantic,
+    "search_hybrid": search_hybrid,
+    "deepen_file": deepen_file,
 }
 
 
 def dispatch(tool_name: str, args: dict) -> str:
-    """根据工具名和参数分发到对应的检索函数，返回文本输出。"""
     fn = TOOL_FUNCTIONS.get(tool_name)
     if fn is None:
         return f"[ERROR] 未知工具名: {tool_name}，可用工具: {list(TOOL_FUNCTIONS)}"
-    return fn(**args)
+
+    try:
+        return fn(**args)
+    except TypeError as e:
+        logger.exception("工具参数错误: %s(%s)", tool_name, args)
+        return (
+            f"[{tool_name} ARGUMENT ERROR] {e}\n"
+            f"收到参数: {args}\n"
+            f"请检查工具 schema，并使用正确参数调用。"
+        )
 
 
 # ===========================================================================
-# Tool Schema（OpenAI function calling 格式）
+# Tool Schema
 # ===========================================================================
 
 RETRIEVAL_TOOLS = [
@@ -341,12 +525,15 @@ RETRIEVAL_TOOLS = [
         "function": {
             "name": "search_structural",
             "description": (
-                "【结构检索】在代码仓库的调用图中，找到与指定节点扮演相同结构角色的函数/类。\n"
-                "适用场景：\n"
-                "- 你已定位到某个函数（如 parse_url），想找到仓库中扮演类似角色的其他函数\n"
-                "- 寻找具有相同调用模式（高扇入/高扇出）的函数，评估修改影响范围\n"
-                "- 通过结构相似性找到可能存在相同 bug 的其他函数\n"
-                "注意：此工具关注的是代码图中的拓扑角色，而非功能语义。"
+                "【粗粒度结构关系检索】给定一个已知 node_id，在代码图中查找结构上相关的节点。\n"
+                "这个工具不是自然语言搜索工具；必须使用 search_hybrid/search_semantic 等结果中的 node_id 作为输入。\n"
+                "支持关系模式：\n"
+                "- siblings: 同类方法、同模块类、同包文件中的兄弟节点\n"
+                "- inheritance: 父类、子类、共父兄弟类、父类同名方法\n"
+                "- dependencies: 文件级导入/被导入关系，以及已知调用/被调用关系\n"
+                "- co_dependents: 与当前文件具有相似导入模式的文件代表节点\n"
+                "- related: 综合以上所有关系\n"
+                "适用场景：已定位一个相关类/函数/文件节点后，扩展上下文、寻找相关实现、父子类、兄弟类或依赖文件。"
             ),
             "parameters": {
                 "type": "object",
@@ -354,14 +541,29 @@ RETRIEVAL_TOOLS = [
                     "node_id": {
                         "type": "string",
                         "description": (
-                            "目标节点的完整 ID，格式为 'relative/path/to/file.py::ClassName.method_name' "
-                            "或 'relative/path/to/file.py::function_name'。"
-                            "例如：'requests/models.py::Response.json' 或 'requests/utils.py::parse_url'"
+                            "已知节点 ID。必须来自 search_hybrid/search_semantic/search_structural 的结果，"
+                            "例如结果中的“节点ID”字段。不要传自然语言 query。"
                         ),
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": [
+                            "siblings",
+                            "inheritance",
+                            "dependencies",
+                            "co_dependents",
+                            "related",
+                        ],
+                        "description": (
+                            "结构关系模式。默认 related。"
+                            "siblings=兄弟节点；inheritance=继承关系；dependencies=依赖关系；"
+                            "co_dependents=相似导入模式；related=综合关联。"
+                        ),
+                        "default": "related",
                     },
                     "top_k": {
                         "type": "integer",
-                        "description": "返回最相似的节点数量，默认 5，最大建议 10",
+                        "description": "返回数量，默认 5",
                         "default": 5,
                     },
                 },
@@ -374,29 +576,19 @@ RETRIEVAL_TOOLS = [
         "function": {
             "name": "search_semantic",
             "description": (
-                "【语义检索】根据自然语言描述，找到功能语义最匹配的函数/类。\n"
-                "适用场景：\n"
-                "- 知道 bug 的症状描述，想找到可能相关的函数（如：'HTTP 响应解码'）\n"
-                "- 寻找某类功能的实现（如：'URL 参数编码'）\n"
-                "- 根据 issue 描述直接检索可能的 bug 位置\n"
-                "注意：此工具基于函数注释和功能描述做语义匹配，"
-                "建议在有 LLM 生成注释（comment 字段非空）的仓库上使用效果最好。"
+                "【语义检索】根据自然语言描述，找到功能语义最匹配的函数、类或文件节点。\n"
+                "适用场景：知道 bug 症状、报错信息、参数名或行为描述，但不知道具体实现位置时。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": (
-                            "自然语言检索查询，可以是：\n"
-                            "- issue 描述的关键部分，如 'UnicodeDecodeError HTTP response charset'\n"
-                            "- 功能描述，如 '解码 HTTP 响应体'\n"
-                            "- 错误关键词，如 'Content-Type without charset'"
-                        ),
+                        "description": "自然语言检索查询，例如 bug 症状、参数名、错误信息或目标行为。",
                     },
                     "top_k": {
                         "type": "integer",
-                        "description": "返回最相关的节点数量，默认 5",
+                        "description": "返回数量，默认 5",
                         "default": 5,
                     },
                 },
@@ -409,37 +601,58 @@ RETRIEVAL_TOOLS = [
         "function": {
             "name": "search_hybrid",
             "description": (
-                "【混合检索（推荐）】综合代码图结构分析和语义相似度，找到最相关的函数/类。\n"
-                "相比单独的结构或语义检索，混合检索覆盖更全面：\n"
-                "- 结构分析找到'扮演相同角色'的节点（可能描述不同但功能相似）\n"
-                "- 语义匹配找到'描述相关'的节点（可能结构不同但功能相关）\n"
-                "- 每个结果附带结构匹配原因、语义关联说明、结构位置摘要\n\n"
-                "适用场景（建议优先使用此工具）：\n"
-                "- 分析 issue 时的初步探索：搜索 issue 关键词\n"
-                "- 不确定 bug 在哪里时：搜索错误描述\n"
-                "- 寻找修复参考时：搜索相关功能描述\n\n"
-                "结果中的'结构位置'字段告诉你该函数被谁调用、依赖谁，修改它影响哪些路径。"
+                "【混合检索（推荐首选）】根据自然语言 query 找到最相关的函数、类或文件节点。\n"
+                "当前推荐作为定位入口：先用 search_hybrid 找 seed nodes，再用 search_structural 对已知 node_id 做关系扩展。\n"
+                "每个结果会尽量包含节点ID、文件路径、行号、结构关系依据和语义关联说明。\n"
+                "注意：初始状态为骨架图；如果需要方法级细节或调用边，请用 deepen_file 深化相关文件。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": (
-                            "检索查询，可以是自然语言描述、issue 关键词或错误信息。\n"
-                            "示例：\n"
-                            "- 'HTTP response decoding UnicodeDecodeError Content-Type charset'\n"
-                            "- '处理重定向时出现无限循环'\n"
-                            "- 'SSL certificate verification'"
-                        ),
+                        "description": "自然语言检索查询。",
                     },
                     "top_k": {
                         "type": "integer",
-                        "description": "返回结果数量，默认 5，建议不超过 8（避免 context 过长）",
+                        "description": "返回数量，默认 5",
                         "default": 5,
                     },
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deepen_file",
+            "description": (
+                "【文件深化】对指定文件进行完整 AST 解析，补充方法级节点和函数调用关系。\n"
+                "初始代码图是骨架级，主要包含模块、类名、函数签名、导入关系和继承关系；"
+                "当你需要查看方法级细节、调用边或完整源码片段时，应深化相关文件。\n"
+                "深化后：\n"
+                "- 创建方法节点和更细粒度函数节点\n"
+                "- 分析函数调用关系\n"
+                "- 自动更新语义索引\n"
+                "- 刷新结构关系索引\n"
+                "- 返回新增方法列表和可进一步深化的关联文件\n\n"
+                "每次任务最多深化 20 个文件。建议只深化与 issue 最相关的文件。\n"
+                "推荐工作流：search_hybrid → deepen_file → bash 读源码 → search_structural 扩展相关节点。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": (
+                            "要深化的文件相对路径，如 'requests/models.py' 或 'astropy/modeling/separable.py'。"
+                            "可以从 search 结果的“文件”字段获取。如果结果中包含 node_id，"
+                            "请只传文件路径部分。"
+                        ),
+                    },
+                },
+                "required": ["file_path"],
             },
         },
     },

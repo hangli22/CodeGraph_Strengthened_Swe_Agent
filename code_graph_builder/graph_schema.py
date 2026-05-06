@@ -1,34 +1,6 @@
 """
 graph_schema.py — 节点/边统一 Schema 与 CodeGraph 数据结构
-对应论文 3.2.1：图的整体设计
-
-节点 Schema
------------
-  id          : str   — 全局唯一标识符，格式为 "<file>::<qualified_name>"
-  type        : NodeType  — 节点类型（MODULE / CLASS / FUNCTION / METHOD）
-  name        : str   — 短名称（函数名/类名/文件名）
-  qualified_name : str — 完整限定名，如 "mypackage.utils.helper"
-  file        : str   — 相对于仓库根目录的文件路径
-  start_line  : int   — 源码起始行（1-based）
-  end_line    : int   — 源码结束行（1-based）
-  code_text   : str   — 对应的源码文本（原始字符串，后续用于 embedding）
-  # 添加代码注释字段
-
-边 Schema
-----------
-  src         : str   — 源节点 id
-  dst         : str   — 目标节点 id
-  relation_type : EdgeType  — 边的语义类型（见 EdgeType 枚举）
-
-EdgeType 枚举说明
------------------
-  CONTAINS        : 模块（文件）包含函数/类（文件结构）
-  IMPORTS         : 模块 A import 模块 B（跨文件依赖）
-  PARENT_CHILD    : AST 父子关系（类包含方法）
-  SIBLING         : AST 兄弟关系（同一父节点的同级节点）
-  CALLS           : 函数调用关系（调用者 → 被调用者）
-  INHERITS        : 类继承关系（子类 → 父类）
-  OVERRIDES       : 方法重写关系（子类方法 → 被重写的父类方法）
+对应论文 3.2.1：图的整体设计（含骨架/完整两级解析深度支持）
 """
 
 from __future__ import annotations
@@ -43,37 +15,28 @@ from typing import Dict, List, Optional, Iterator
 import networkx as nx
 
 
-# ---------------------------------------------------------------------------
-# 枚举定义
-# ---------------------------------------------------------------------------
-
 class NodeType(str, Enum):
-    MODULE   = "MODULE"    # 文件级节点
-    CLASS    = "CLASS"     # 类定义
-    FUNCTION = "FUNCTION"  # 顶层函数
-    METHOD   = "METHOD"    # 类中的方法
+    MODULE   = "MODULE"
+    CLASS    = "CLASS"
+    FUNCTION = "FUNCTION"
+    METHOD   = "METHOD"
 
 
 class EdgeType(str, Enum):
-    # 文件结构关系 (3.2.2)
-    CONTAINS     = "CONTAINS"      # 文件 → 函数/类
-    IMPORTS      = "IMPORTS"       # 文件 → 被导入文件
-
-    # AST 关系 (3.2.3)
-    PARENT_CHILD = "PARENT_CHILD"  # 类 → 方法
-    SIBLING      = "SIBLING"       # 同级节点
-
-    # 函数调用图 (3.2.4)
-    CALLS        = "CALLS"         # 函数/方法 → 函数/方法
-
-    # 类继承层次 (3.2.5)
-    INHERITS     = "INHERITS"      # 子类 → 父类
-    OVERRIDES    = "OVERRIDES"     # 子类方法 → 父类方法
+    CONTAINS     = "CONTAINS"
+    IMPORTS      = "IMPORTS"
+    PARENT_CHILD = "PARENT_CHILD"
+    SIBLING      = "SIBLING"
+    CALLS        = "CALLS"
+    INHERITS     = "INHERITS"
+    OVERRIDES    = "OVERRIDES"
 
 
-# ---------------------------------------------------------------------------
-# 数据类
-# ---------------------------------------------------------------------------
+class FileDepth(str, Enum):
+    """文件的解析深度状态。"""
+    SKELETON = "skeleton"   # 只解析了顶层签名
+    FULL     = "full"       # 已完整解析（含方法体、调用关系）
+
 
 @dataclass
 class CodeNode:
@@ -84,9 +47,12 @@ class CodeNode:
     file:           str
     start_line:     int
     end_line:       int
-    code_text:      str = ""
-    comment:   str = ""   # LLM 生成的自然语言注释
-
+    code_text:      str  = ""
+    comment:        str  = ""
+    # ── 骨架模式新增字段 ──────────────────────
+    method_names:   List[str] = field(default_factory=list)   # CLASS 骨架节点的方法名列表
+    signature:      str  = ""   # 函数签名 / 类基类列表
+    docstring:      str  = ""   # 提取的 docstring 首行
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -97,7 +63,32 @@ class CodeNode:
     def from_dict(cls, d: dict) -> "CodeNode":
         d = d.copy()
         d["type"] = NodeType(d["type"])
+        # 兼容旧数据：缺失的新字段使用默认值
+        for key, default in [("method_names", []), ("signature", ""), ("docstring", "")]:
+            if key not in d:
+                d[key] = default
         return cls(**d)
+
+    def skeleton_embedding_text(self) -> str:
+        """生成骨架模式下的紧凑 embedding 文本。"""
+        if self.type == NodeType.CLASS:
+            parts = [f"class {self.name}{self.signature}"]
+            if self.docstring:
+                parts.append(f": {self.docstring}")
+            if self.method_names:
+                parts.append(f". Methods: {', '.join(self.method_names)}")
+            return " ".join(parts)
+        elif self.type in (NodeType.FUNCTION, NodeType.METHOD):
+            parts = [f"def {self.name}{self.signature}"]
+            if self.docstring:
+                parts.append(f": {self.docstring}")
+            return " ".join(parts)
+        elif self.type == NodeType.MODULE:
+            parts = [f"module {self.name}"]
+            if self.docstring:
+                parts.append(f": {self.docstring}")
+            return " ".join(parts)
+        return self.qualified_name
 
 
 @dataclass
@@ -118,29 +109,49 @@ class CodeEdge:
         return cls(**d)
 
 
-# ---------------------------------------------------------------------------
-# CodeGraph：统一图结构
-# ---------------------------------------------------------------------------
-
 class CodeGraph:
     """
     基于 NetworkX DiGraph 的多层代码图。
-
-    提供节点/边的增删查接口，以及序列化（JSON / Pickle）方法。
-    每个节点以 CodeNode.id 为键，携带完整 CodeNode 作为属性；
-    每条边以 (src, dst, relation_type) 三元组唯一标识。
+    支持骨架/完整两级解析深度跟踪。
     """
 
     def __init__(self, repo_root: str = ""):
         self.repo_root = repo_root
         self._g: nx.MultiDiGraph = nx.MultiDiGraph()
+        self._file_depth: Dict[str, str] = {}   # file_rel → "skeleton" | "full"
+
+    # 兼容旧 pickle（缺少 _file_depth 属性时自动初始化）
+    def __getattr__(self, name):
+        if name == "_file_depth":
+            self._file_depth = {}
+            return self._file_depth
+        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    # ------------------------------------------------------------------
+    # 文件解析深度管理
+    # ------------------------------------------------------------------
+
+    def get_file_depth(self, file_rel: str) -> str:
+        """返回文件的解析深度：'skeleton' / 'full' / '' (未解析)。"""
+        return self._file_depth.get(file_rel, "")
+
+    def set_file_depth(self, file_rel: str, depth: str) -> None:
+        self._file_depth[file_rel] = depth
+
+    def get_skeleton_files(self) -> List[str]:
+        return [f for f, d in self._file_depth.items() if d == "skeleton"]
+
+    def get_deepened_files(self) -> List[str]:
+        return [f for f, d in self._file_depth.items() if d == "full"]
+
+    def get_all_parsed_files(self) -> Dict[str, str]:
+        return dict(self._file_depth)
 
     # ------------------------------------------------------------------
     # 节点操作
     # ------------------------------------------------------------------
 
     def add_node(self, node: CodeNode) -> None:
-        """添加或更新节点（id 相同则覆盖属性）。"""
         self._g.add_node(node.id, **node.to_dict())
 
     def get_node(self, node_id: str) -> Optional[CodeNode]:
@@ -150,6 +161,12 @@ class CodeGraph:
 
     def has_node(self, node_id: str) -> bool:
         return node_id in self._g
+
+    def update_node_attr(self, node_id: str, **kwargs) -> None:
+        """更新节点的指定属性（就地修改）。"""
+        if node_id in self._g:
+            for k, v in kwargs.items():
+                self._g.nodes[node_id][k] = v
 
     def iter_nodes(self, node_type: Optional[NodeType] = None) -> Iterator[CodeNode]:
         for nid, attrs in self._g.nodes(data=True):
@@ -162,7 +179,6 @@ class CodeGraph:
     # ------------------------------------------------------------------
 
     def add_edge(self, edge: CodeEdge) -> None:
-        """添加边（允许同一对节点之间存在不同类型的多条边）。"""
         self._g.add_edge(edge.src, edge.dst, relation_type=edge.relation_type.value)
 
     def has_edge(self, src: str, dst: str, relation_type: EdgeType) -> bool:
@@ -181,6 +197,8 @@ class CodeGraph:
 
     def successors(self, node_id: str, relation_type: Optional[EdgeType] = None) -> List[str]:
         result = []
+        if node_id not in self._g:
+            return result
         for _, dst, attrs in self._g.out_edges(node_id, data=True):
             if relation_type is None or attrs.get("relation_type") == relation_type.value:
                 result.append(dst)
@@ -188,6 +206,8 @@ class CodeGraph:
 
     def predecessors(self, node_id: str, relation_type: Optional[EdgeType] = None) -> List[str]:
         result = []
+        if node_id not in self._g:
+            return result
         for src, _, attrs in self._g.in_edges(node_id, data=True):
             if relation_type is None or attrs.get("relation_type") == relation_type.value:
                 result.append(src)
@@ -208,9 +228,14 @@ class CodeGraph:
             nt = attrs.get("type", "UNKNOWN")
             node_counts[nt] = node_counts.get(nt, 0) + 1
 
+        skeleton_count = len(self.get_skeleton_files())
+        full_count     = len(self.get_deepened_files())
+
         return {
             "total_nodes": self._g.number_of_nodes(),
             "total_edges": self._g.number_of_edges(),
+            "skeleton_files": skeleton_count,
+            "deepened_files": full_count,
             **{f"nodes_{k}": v for k, v in node_counts.items()},
             **{f"edges_{k}": v for k, v in edge_counts.items()},
         }
@@ -220,27 +245,37 @@ class CodeGraph:
     # ------------------------------------------------------------------
 
     def save_pickle(self, path: str) -> None:
-        """保存为 Pickle 格式（推荐，完整保留 NetworkX 对象）。"""
         with open(path, "wb") as f:
-            pickle.dump({"repo_root": self.repo_root, "graph": self._g}, f)
+            pickle.dump({
+                "repo_root":  self.repo_root,
+                "graph":      self._g,
+                "file_depth": self._file_depth,
+            }, f)
 
     @classmethod
     def load_pickle(cls, path: str) -> "CodeGraph":
         with open(path, "rb") as f:
             data = pickle.load(f)
+        if isinstance(data, cls):
+            # 兼容旧格式：直接 pickle 了 CodeGraph 对象
+            return data
         cg = cls(repo_root=data["repo_root"])
         cg._g = data["graph"]
+        cg._file_depth = data.get("file_depth", {})
         return cg
 
     def save_json(self, path: str) -> None:
-        """保存为 JSON 格式（可读性好，便于调试）。"""
         nodes = [CodeNode.from_dict(dict(attrs)).to_dict()
                  for _, attrs in self._g.nodes(data=True)]
         edges = [{"src": s, "dst": d, "relation_type": a["relation_type"]}
                  for s, d, a in self._g.edges(data=True)]
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"repo_root": self.repo_root, "nodes": nodes, "edges": edges},
-                      f, ensure_ascii=False, indent=2)
+            json.dump({
+                "repo_root":  self.repo_root,
+                "nodes":      nodes,
+                "edges":      edges,
+                "file_depth": self._file_depth,
+            }, f, ensure_ascii=False, indent=2)
 
     @classmethod
     def load_json(cls, path: str) -> "CodeGraph":
@@ -251,10 +286,11 @@ class CodeGraph:
             cg.add_node(CodeNode.from_dict(nd))
         for ed in data["edges"]:
             cg.add_edge(CodeEdge.from_dict(ed))
+        cg._file_depth = data.get("file_depth", {})
         return cg
 
-    # 方便调试
     def __repr__(self) -> str:
         s = self.stats()
         return (f"CodeGraph(repo='{self.repo_root}', "
-                f"nodes={s['total_nodes']}, edges={s['total_edges']})")
+                f"nodes={s['total_nodes']}, edges={s['total_edges']}, "
+                f"skeleton={s['skeleton_files']}, deepened={s['deepened_files']})")
