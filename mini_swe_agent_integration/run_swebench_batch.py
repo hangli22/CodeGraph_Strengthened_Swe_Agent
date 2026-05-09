@@ -214,7 +214,6 @@ _BASELINE_INSTANCE_TEMPLATE = (
 # ===========================================================================
 
 _RETRIEVAL_SYSTEM_TEMPLATE = (
-    _RETRIEVAL_SYSTEM_TEMPLATE = (
     "你是一名负责修复代码仓库 issue 的软件工程师。\n"
     "\n"
     "你只能通过工具调用与环境交互。每一轮 assistant 响应都必须且只能包含一个工具调用。\n"
@@ -365,7 +364,6 @@ _RETRIEVAL_SYSTEM_TEMPLATE = (
     "\n"
     "最终提交：\n"
     "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n"
-)
 )
 
 

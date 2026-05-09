@@ -20,7 +20,7 @@ python mini_swe_agent_integration/run_swebench_batch.py \
   --api_base https://uni-api.cstcloud.cn/v1 \
   --subset lite \
   --split test \
-  --slice 20:21 \
+  --slice 20:25 \
   --output_dir ./results/baseline_docker_smoke \
   --repos_dir ./repos \
   --cache_dir ./cache \
