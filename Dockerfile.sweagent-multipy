@@ -1,0 +1,84 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUTF8=1
+ENV PYTHONIOENCODING=utf-8
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_DEFAULT_TIMEOUT=60
+ENV PIP_RETRIES=3
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    software-properties-common \
+    ca-certificates \
+    curl \
+    git \
+    bash \
+    build-essential \
+    gcc \
+    g++ \
+    make \
+    pkg-config \
+    gnupg \
+    gpg-agent \
+    dirmngr \
+    libffi-dev \
+    libssl-dev \
+    zlib1g-dev \
+    libbz2-dev \
+    libreadline-dev \
+    libsqlite3-dev \
+    liblzma-dev \
+    tk-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+    python3.8 python3.8-venv python3.8-dev \
+    python3.9 python3.9-venv python3.9-dev \
+    python3.10 python3.10-venv python3.10-dev \
+    python3.11 python3.11-venv python3.11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------
+# Build local wheelhouse.
+#
+# 注意：
+# - pip download 发生在 image build 阶段，只下载一次。
+# - 每个 Python 版本单独一个 wheelhouse，避免 cp38/cp39/cp310/cp311 wheel 混在一起。
+# - 下载失败不直接让镜像构建失败，避免某个包版本不可用导致整张镜像构建中断。
+# ------------------------------------------------------------
+
+RUN mkdir -p /opt/wheelhouse/py38 /opt/wheelhouse/py39 /opt/wheelhouse/py310 /opt/wheelhouse/py311
+
+RUN set -eux; \
+    for py in 3.8 3.9 3.10 3.11; do \
+      pybin="python${py}"; \
+      tag="py$(echo ${py} | tr -d '.')"; \
+      wh="/opt/wheelhouse/${tag}"; \
+      venv="/tmp/wheelbuild-${tag}"; \
+      echo "[wheelhouse] preparing ${pybin} -> ${wh}"; \
+      ${pybin} -m venv "${venv}"; \
+      . "${venv}/bin/activate"; \
+      python -m pip install -U pip wheel packaging; \
+      python -m pip download -d "${wh}" \
+        pip wheel packaging setuptools \
+        pytest hypothesis \
+        cython extension-helpers oldest-supported-numpy \
+        || echo "[wheelhouse][warning] basic package download failed for ${pybin}"; \
+      python -m pip download -d "${wh}" \
+        "numpy==1.21.6" "numpy==1.22.4" "numpy==1.23.5" "numpy==1.24.4" \
+        || echo "[wheelhouse][warning] numpy multi-version download partially failed for ${pybin}"; \
+      python -m pip download -d "${wh}" \
+        "scipy==1.7.3" "scipy==1.8.1" "scipy==1.9.3" "scipy==1.10.1" \
+        || echo "[wheelhouse][warning] scipy multi-version download partially failed for ${pybin}"; \
+      deactivate; \
+      rm -rf "${venv}"; \
+    done
+
+# 可选：显示 wheelhouse 内容，方便构建日志排查。
+RUN find /opt/wheelhouse -maxdepth 2 -type f | sed -n '1,120p'
+
+WORKDIR /workspace/repo
+
+CMD ["bash"]

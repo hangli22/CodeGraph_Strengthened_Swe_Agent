@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import pickle
-from typing import Optional, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -28,6 +28,22 @@ logger = logging.getLogger(__name__)
 
 _cache: dict = {}
 MAX_DEEPEN_FILES = 20
+
+# BM25 多路查询分组权重。BM25 主要用于召回，所以这里的权重只用于
+# BM25 多路结果内部融合，不替代 semantic 的最终语义打分。
+BM25_GROUP_WEIGHTS: Dict[str, float] = {
+    "current_query": 1.00,
+    "initial_exact_symbols": 1.50,
+    "initial_method_class": 1.30,
+    "initial_behavior": 1.00,
+    "initial_error": 1.10,
+    "initial_bm25_queries": 1.20,
+    "query_exact_symbols": 1.40,
+    "query_method_class": 1.25,
+    "query_behavior": 1.00,
+    "query_error": 1.10,
+    "query_bm25_queries": 1.15,
+}
 
 
 def _get_cache_dir() -> str:
@@ -174,6 +190,142 @@ def _load_semantic_retriever():
     return retriever
 
 
+def _load_bm25_retriever():
+    """加载 BM25 词法检索器。"""
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    from code_graph_retriever.bm25_retriever import BM25Retriever
+
+    graph = _load_cached("graph", _load_graph)
+    retriever = BM25Retriever(graph).build()
+    return retriever
+
+
+def _load_hybrid_retriever():
+    """
+    加载融合检索器，并复用已缓存的 structural / semantic / BM25 分支。
+
+    这样可以避免每次 search_hybrid 都重新构造 BM25 索引，也能保证 deepen_file
+    后更新的是同一个进程内 retriever 对象。
+    """
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    from code_graph_retriever.hybrid_retriever import HybridRetriever
+
+    graph = _load_cached("graph", _load_graph)
+    struct_retriever = _load_cached("structural_retriever", _load_structural_retriever)
+    sem_retriever = _load_cached("semantic_retriever", _load_semantic_retriever)
+    bm25_retriever = _load_cached("bm25_retriever", _load_bm25_retriever)
+
+    retriever = HybridRetriever(graph)
+    retriever._structural = struct_retriever
+    retriever._semantic = sem_retriever
+    retriever._bm25 = bm25_retriever
+    retriever._built = True
+    return retriever
+
+
+def _build_bm25_bundle_for_query(query: str):
+    """
+    在 retrieval_tools 层读取 issue_focus，并构造 BM25 多路查询。
+
+    设计原则：
+      - issue_focus 属于 instance/cache 级上下文，不塞进 HybridRetriever 内部。
+      - 默认启用 query_focus：每次 search_hybrid 会尝试根据当前 query 更新 query_focus。
+      - 如果 LLM 抽取失败，降级为 initial_issue_focus + current_query，不影响检索主流程。
+    """
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    try:
+        from code_graph_retriever.issue_focus import IssueFocusStore
+
+        store = IssueFocusStore(cache_dir=_get_cache_dir())
+
+        try:
+            return store.build_bm25_query_bundle(
+                current_query=query,
+                include_query_focus=True,
+                update_query_focus=True,
+                max_queries=12,
+            )
+        except Exception as e:
+            logger.warning(
+                "query_focus 抽取/更新失败，降级为已有 issue_focus + current_query: %s",
+                e,
+            )
+            return store.build_bm25_query_bundle(
+                current_query=query,
+                include_query_focus=True,
+                update_query_focus=False,
+                max_queries=12,
+            )
+    except Exception as e:
+        logger.warning("issue_focus 不可用，BM25 将仅使用当前 query: %s", e)
+
+        class _FallbackBundle:
+            current_query = query
+            queries = [query] if query and query.strip() else []
+            query_groups = {"current_query": queries}
+
+            def to_list(self):
+                return self.queries
+
+        return _FallbackBundle()
+
+def _build_deepen_issue_query(explicit_query: str = "") -> str:
+    """
+    为 deepen_file 构造 issue_query。
+
+    deepen_file 的 method_summary 依赖 issue_query。
+    如果 agent 没显式传 issue_query，则从 issue_focus/query_focus 中恢复。
+    """
+    explicit_query = (explicit_query or "").strip()
+    if explicit_query:
+        return explicit_query
+
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+    try:
+        from code_graph_retriever.issue_focus import build_deepen_issue_query_from_cache
+
+        q = build_deepen_issue_query_from_cache(
+            cache_dir=_get_cache_dir(),
+            explicit_query=explicit_query,
+        )
+        if q.strip():
+            return q.strip()
+
+    except Exception as e:
+        logger.warning(
+            "从 issue_focus 构造 deepen issue_query 失败，将不生成 issue-related method summary: %s",
+            e,
+        )
+
+    return ""
+
+
+def _format_bm25_group_summary(bundle: Any) -> str:
+    """生成简短 BM25 query bundle 摘要，方便日志和 agent 理解检索依据。"""
+    try:
+        groups = getattr(bundle, "query_groups", {}) or {}
+        parts = []
+        for name, qs in groups.items():
+            clean = [str(q).strip() for q in (qs or []) if str(q).strip()]
+            if clean:
+                parts.append(f"{name}:{len(clean)}")
+        return ", ".join(parts[:8]) if parts else "current_query only"
+    except Exception:
+        return "unknown"
+
+
 # ===========================================================================
 # 工具函数
 # ===========================================================================
@@ -297,62 +449,72 @@ def search_semantic(query: str, top_k: int = 5) -> str:
 
 def search_hybrid(query: str, top_k: int = 5) -> str:
     """
-    混合检索。
+    混合检索入口。
 
-    注意：
-    当前 StructuralRetriever 已改为“已知 node_id 的关系扩展工具”。
-    因此 HybridRetriever 如果要融合结构信息，应采用：
-      natural language query -> semantic seed nodes -> structural expansion
-    的方式。
+    当前流程：
+      1. semantic search 拿一批候选
+      2. retrieval_tools 读取 issue_focus，组装 BM25 多路 query
+      3. BM25 多路 search 拿一批候选
+      4. 合并 semantic + BM25 候选
+      5. 从综合候选里选 top 1~3 个作为 structural expansion seed
+      6. structural search_by_node_id(seed)
+      7. merge 三路结果
 
-    这里仍然保留原有 HybridRetriever 接入方式，前提是 hybrid_retriever.py
-    已经适配新的 StructuralRetriever.search_by_node_id() 兼容接口。
+    BM25 不替代 semantic，只负责增强召回；最终仍保留 semantic_score、
+    structural_score 和 bm25_score 三路分数。
     """
     try:
-        import sys
+        retriever = _load_cached("hybrid_retriever", _load_hybrid_retriever)
+        bm25_bundle = _build_bm25_bundle_for_query(query)
+        bm25_queries = bm25_bundle.to_list()
+        bm25_query_groups = getattr(bm25_bundle, "query_groups", {}) or {}
 
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-        graph = _load_cached("graph", _load_graph)
-        struct_retriever = _load_cached("structural_retriever", _load_structural_retriever)
-        sem_retriever = _load_cached("semantic_retriever", _load_semantic_retriever)
-
-        from code_graph_retriever.hybrid_retriever import HybridRetriever
-
-        retriever = HybridRetriever(graph)
-        retriever._structural = struct_retriever
-        retriever._semantic = sem_retriever
-        retriever._built = True
-
-        response = retriever.search(query, top_k=top_k)
+        response = retriever.search(
+            query,
+            top_k=top_k,
+            bm25_queries=bm25_queries,
+            bm25_query_groups=bm25_query_groups,
+            bm25_group_weights=BM25_GROUP_WEIGHTS,
+            structural_seed_k=3,
+        )
 
         if not response.results:
             return (
                 f"[hybrid_search] 未找到与 '{query}' 相关的节点。\n"
-                f"（共检索 {response.total_nodes} 个节点，耗时 {response.elapsed_ms:.1f}ms）"
+                f"（共检索 {response.total_nodes} 个节点，耗时 {response.elapsed_ms:.1f}ms）\n"
+                f"BM25查询组: {_format_bm25_group_summary(bm25_bundle)}"
             )
 
         lines = [
             f"[hybrid_search] 找到 {len(response.results)} 个相关节点",
             f"查询: {query}",
             f"检索范围: {response.total_nodes} 个节点  耗时: {response.elapsed_ms:.1f}ms",
-            f"说明: 语义检索用于定位候选节点，结构检索用于已知节点的粗粒度关系扩展",
+            "说明: semantic 负责语义候选，BM25(issue_focus+query) 负责词法召回，结构检索负责围绕高置信 seed 扩展关系节点",
+            f"BM25查询组: {_format_bm25_group_summary(bm25_bundle)}",
             "=" * 60,
         ]
 
         for i, r in enumerate(response.results, 1):
+            bm25_score = float(getattr(r, "bm25_score", 0.0) or 0.0)
             lines += [
                 f"\n[{i}] {r.qualified_name}  [{r.node_type}]",
                 f"    节点ID: {r.node_id}",
                 f"    文件: {r.file}  行: {r.start_line}~{r.end_line}",
                 f"    综合评分: {r.final_score:.3f}  "
-                f"（结构: {r.structural_score:.3f} | 语义: {r.semantic_score:.3f}）",
+                f"（结构: {r.structural_score:.3f} | 语义: {r.semantic_score:.3f} | BM25: {bm25_score:.3f}）",
             ]
 
             if r.structural_reason:
                 lines.append(f"    结构关系依据: {r.structural_reason}")
             if r.semantic_reason:
                 lines.append(f"    语义关联说明: {r.semantic_reason}")
+            bm25_reason = getattr(r, "bm25_reason", "") or ""
+            if bm25_reason:
+                lines.append(f"    BM25词法命中: {bm25_reason}")
+            bm25_hit_queries = getattr(r, "bm25_hit_queries", []) or []
+            if bm25_hit_queries:
+                hit_q = ", ".join(str(x) for x in bm25_hit_queries[:5])
+                lines.append(f"    BM25命中查询: {hit_q}")
             if r.position_summary:
                 lines.append(f"    结构位置: {r.position_summary}")
             if r.comment:
@@ -364,127 +526,219 @@ def search_hybrid(query: str, top_k: int = 5) -> str:
         logger.exception("hybrid_search 失败")
         return f"[hybrid_search ERROR] {type(e).__name__}: {e}"
 
-
-def deepen_file(file_path: str) -> str:
+def deepen_file(
+    file_path: str,
+    issue_query: str = "",
+    top_methods: int = 5,
+    expand_neighbor_classes: bool = True,
+    max_neighbor_files: int = 3,
+) -> str:
     """
     按需深化文件：完整解析 AST，补充方法级节点和调用关系，更新检索索引。
+
+    Parameters
+    ----------
+    file_path:
+        要深化的文件相对路径。
+    issue_query:
+        当前 issue 或当前检索 query。可选。
+        如果为空，系统会尝试从 issue_focus/query_focus/SWE_ISSUE_TEXT 自动补全。
+        只要最终 issue_query 非空，FileDeepener 就会生成 issue-related method_summary。
+    top_methods:
+        issue-related method summary 的种子方法数量。
+    expand_neighbor_classes:
+        是否根据相关 method 的相邻类继续深化少量相邻文件。
+    max_neighbor_files:
+        最多额外深化多少个相邻类文件。
     """
-    try:
-        import sys
-        import time as _time
+    import sys
 
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-        graph = _load_cached("graph", _load_graph)
-        struct_ret = _load_cached("structural_retriever", _load_structural_retriever)
-        sem_ret = _load_cached("semantic_retriever", _load_semantic_retriever)
+    graph = _load_cached("graph", _load_graph)
+    struct_ret = _load_cached("structural_retriever", _load_structural_retriever)
+    sem_ret = _load_cached("semantic_retriever", _load_semantic_retriever)
+    bm25_ret = _load_cached("bm25_retriever", _load_bm25_retriever)
 
-        # 规范化路径
-        file_rel = file_path.lstrip("./").replace("\\", "/")
-        if "::" in file_rel:
-            file_rel = file_rel.split("::")[0]
+    # 规范化路径
+    file_rel = file_path.lstrip("./").replace("\\", "/")
+    if "::" in file_rel:
+        file_rel = file_rel.split("::")[0]
 
-        # 前置检查
-        depth = graph.get_file_depth(file_rel)
-        if depth == "full":
-            return f"[deepen_file] 文件 {file_rel} 已是完整解析状态，无需深化。"
-        if depth == "":
-            return f"[deepen_file] 文件 {file_rel} 不在代码图中。请检查路径。"
+    # 前置检查
+    depth = graph.get_file_depth(file_rel)
+    if depth == "full":
+        return f"[deepen_file] 文件 {file_rel} 已是完整解析状态，无需深化。"
+    if depth == "":
+        return f"[deepen_file] 文件 {file_rel} 不在代码图中。请检查路径。"
 
-        deepened = graph.get_deepened_files()
-        if len(deepened) >= MAX_DEEPEN_FILES:
-            return (
-                f"[deepen_file] 已达到最大深化数 ({MAX_DEEPEN_FILES})，无法继续。\n"
-                f"已深化文件: {', '.join(deepened[:5])}..."
-            )
-
-        # 执行深化
-        from code_graph_builder.file_deepener import FileDeepener
-
-        deepener = FileDeepener(
-            graph=graph,
-            repo_root=graph.repo_root,
-            embedding_backend=semantic_retriever.backend,
+    deepened = graph.get_deepened_files()
+    if len(deepened) >= MAX_DEEPEN_FILES:
+        return (
+            f"[deepen_file] 已达到最大深化数 ({MAX_DEEPEN_FILES})，无法继续。\n"
+            f"已深化文件: {', '.join(deepened[:5])}..."
         )
 
-        result = deepener.deepen(
-            file_rel=file_rel,
-            issue_query=current_issue_or_query,
-            top_methods=5,
-            expand_neighbor_classes=True,
-            max_neighbor_files=3,
-        )
+    # 关键修改：
+    # 如果 agent 没传 issue_query，则从 issue_focus/query_focus 中自动恢复。
+    # 否则 FileDeepener.deepen(issue_query="") 不会生成 method_summaries。
+    deepen_issue_query = _build_deepen_issue_query(issue_query)
 
-        # 更新语义索引：为新节点计算 embedding
-        if result.new_node_ids and sem_ret.backend is not None:
-            new_texts = []
-            for nid in result.new_node_ids:
-                node = graph.get_node(nid)
-                if node:
-                    if node.comment.strip():
-                        text = node.comment.strip()
-                    elif node.signature or node.docstring:
-                        text = node.skeleton_embedding_text()
-                    else:
-                        text = node.code_text[:500].strip()
-                    new_texts.append(text or nid)
-                else:
-                    new_texts.append(nid)
+    # 执行深化
+    from code_graph_builder.file_deepener import FileDeepener
 
-            try:
-                new_embeddings = sem_ret.backend.embed_batch(new_texts)
-                sem_ret.add_nodes(result.new_node_ids, new_texts, new_embeddings)
-            except Exception as e:
-                logger.warning(
-                    "新节点 embedding 失败: %s（检索仍可用，但新节点暂无语义索引）",
-                    e,
-                )
+    deepener = FileDeepener(
+        graph=graph,
+        repo_root=graph.repo_root,
+        embedding_backend=sem_ret.backend,
+    )
 
-        # 更新结构索引：
-        # 当前结构检索是粗粒度关系检索，不依赖旧 feature_matrix。
-        # deepen 后可能新增方法节点和 CALLS 边，因此 rebuild 可刷新 file index/import profiles。
-        if hasattr(struct_ret, "rebuild"):
-            struct_ret.rebuild()
+    result = deepener.deepen(
+        file_rel=file_rel,
+        issue_query=deepen_issue_query,
+        top_methods=top_methods,
+        expand_neighbor_classes=expand_neighbor_classes,
+        max_neighbor_files=max_neighbor_files,
+    )
 
-        # 生成汇总
-        remaining = MAX_DEEPEN_FILES - len(graph.get_deepened_files())
-        lines = [
-            f"[deepen_file] 文件 {file_rel} 已深化为完整解析",
-            "",
-            f"新增 {result.method_count} 个方法节点:",
-        ]
-
-        for nid in result.new_node_ids[:10]:
+    # 更新语义索引：为新节点计算 embedding
+    if result.new_node_ids and sem_ret.backend is not None:
+        new_texts = []
+        for nid in result.new_node_ids:
             node = graph.get_node(nid)
             if node:
-                sig = node.signature or ""
-                doc = f" — {node.docstring}" if node.docstring else ""
-                lines.append(f"  {node.name}{sig}{doc}")
+                comment = getattr(node, "comment", "") or ""
+                signature = getattr(node, "signature", "") or ""
+                docstring = getattr(node, "docstring", "") or ""
+                code_text = getattr(node, "code_text", "") or ""
 
-        if len(result.new_node_ids) > 10:
-            lines.append(f"  ... 共 {len(result.new_node_ids)} 个")
+                if comment.strip():
+                    text = comment.strip()
+                elif signature or docstring:
+                    text = node.skeleton_embedding_text()
+                else:
+                    text = code_text[:500].strip()
+                new_texts.append(text or nid)
+            else:
+                new_texts.append(nid)
 
-        lines.append("")
-        lines.append(f"新增 {result.new_edge_count} 条关系边 (CALLS: {result.call_edge_count})")
+        try:
+            new_embeddings = sem_ret.backend.embed_batch(new_texts)
+            sem_ret.add_nodes(result.new_node_ids, new_texts, new_embeddings)
+        except Exception as e:
+            logger.warning(
+                "新节点 embedding 失败: %s（检索仍可用，但新节点暂无语义索引）",
+                e,
+            )
 
-        if result.imported_files:
-            lines.append("")
-            lines.append("关联文件（可进一步深化）:")
-            for imp_file in result.imported_files[:8]:
-                lines.append(f"  - {imp_file}")
+    # 更新结构索引：
+    # 当前结构检索是粗粒度关系检索，不依赖旧 feature_matrix。
+    # deepen 后可能新增方法节点和 CALLS 边，因此 rebuild 可刷新结构索引。
+    if hasattr(struct_ret, "rebuild"):
+        struct_ret.rebuild()
 
-        lines.append("")
-        lines.append(
-            f"深化预算: 已使用 {len(graph.get_deepened_files())}/{MAX_DEEPEN_FILES}，剩余 {remaining}"
-        )
-
-        return "\n".join(lines)
-
-    except FileNotFoundError as e:
-        return f"[deepen_file ERROR] {e}"
+    # 更新 BM25 索引：
+    # - 如果 deepen 只是新增节点，可以 add_nodes(result.new_node_ids)。
+    # - 如果 deepen 会修改已有节点文本/comment/method_names/code_text，则必须 rebuild。
+    # 当前 FileDeepener 会补充已有 CLASS/FUNCTION 节点 code_text/signature/docstring，
+    # 因此默认保守 rebuild，保证 BM25 不读旧文本。
+    try:
+        bm25_text_changed = bool(getattr(result, "text_changed", True))
+        if bm25_text_changed and hasattr(bm25_ret, "rebuild"):
+            bm25_ret.rebuild()
+        elif result.new_node_ids and hasattr(bm25_ret, "add_nodes"):
+            bm25_ret.add_nodes(result.new_node_ids)
     except Exception as e:
-        logger.exception("deepen_file 失败")
-        return f"[deepen_file ERROR] {type(e).__name__}: {e}"
+        logger.warning("BM25 索引更新失败: %s（检索仍可用，但 BM25 可能未包含深化内容）", e)
+
+    # 生成汇总
+    remaining = MAX_DEEPEN_FILES - len(graph.get_deepened_files())
+
+    lines = [
+        f"[deepen_file] 文件 {file_rel} 已深化为完整解析",
+        "",
+    ]
+
+    if deepen_issue_query:
+        preview = deepen_issue_query.replace("\n", " ")
+        if len(preview) > 240:
+            preview = preview[:240].rstrip() + "..."
+        lines.append(f"Issue/query context: {preview}")
+    else:
+        lines.append("Issue/query context: <empty>，未生成 issue-related method summary")
+
+    lines += [
+        "",
+        f"新增 {result.method_count} 个方法节点:",
+    ]
+
+    for nid in result.new_node_ids[:10]:
+        node = graph.get_node(nid)
+        if node:
+            sig = getattr(node, "signature", "") or ""
+            docstring = getattr(node, "docstring", "") or ""
+            doc = f" — {docstring}" if docstring else ""
+            lines.append(f"  {node.name}{sig}{doc}")
+
+    if len(result.new_node_ids) > 10:
+        lines.append(f"  ... 共 {len(result.new_node_ids)} 个")
+
+    lines.append("")
+    lines.append(f"新增 {result.new_edge_count} 条关系边 (CALLS: {result.call_edge_count})")
+
+    if result.imported_files:
+        lines.append("")
+        lines.append("关联文件（可进一步深化）:")
+        for imp_file in result.imported_files[:8]:
+            lines.append(f"  - {imp_file}")
+
+    if result.neighbor_deepened_files:
+        lines.append("")
+        lines.append("因相邻类额外深化的文件:")
+        for nf in result.neighbor_deepened_files[:8]:
+            lines.append(f"  - {nf}")
+
+    if result.method_summaries:
+        lines.append("")
+        lines.append("Issue 相关方法摘要:")
+        for i, summary in enumerate(result.method_summaries[:12], 1):
+            lines.append(
+                f"[{i}] {summary.qualified_name} "
+                f"({summary.file}:{summary.start_line}-{summary.end_line}) "
+                f"sim={summary.similarity:.3f}"
+            )
+            if summary.short_summary:
+                lines.append(f"    摘要: {summary.short_summary}")
+            if summary.why_relevant:
+                lines.append(f"    相关性: {summary.why_relevant}")
+            if summary.high_confidence_calls:
+                lines.append("    高置信调用:")
+                for call in summary.high_confidence_calls[:3]:
+                    lines.append(f"      - {call}")
+            if summary.has_full_preview and summary.code_preview:
+                lines.append("    code_preview:")
+                lines.append(summary.code_preview)
+    else:
+        if deepen_issue_query:
+            lines.append("")
+            lines.append(
+                "Issue 相关方法摘要: <empty>。"
+                "可能原因：该文件没有 METHOD 节点、embedding_backend 不可用、"
+                "或 method embedding 排序失败。"
+            )
+
+    if result.relation_summary:
+        lines.append("")
+        lines.append("局部关系提示:")
+        for item in result.relation_summary[:5]:
+            lines.append(f"  - {item}")
+
+    lines.append("")
+    lines.append(
+        f"深化预算: 已使用 {len(graph.get_deepened_files())}/{MAX_DEEPEN_FILES}，剩余 {remaining}"
+    )
+
+    return "\n".join(lines)
 
 
 # ===========================================================================
@@ -502,23 +756,21 @@ TOOL_FUNCTIONS = {
 def dispatch(tool_name: str, args: dict) -> str:
     fn = TOOL_FUNCTIONS.get(tool_name)
     if fn is None:
-        return f"[ERROR] 未知工具名: {tool_name}，可用工具: {list(TOOL_FUNCTIONS)}"
+        raise ValueError(
+            f"未知工具名: {tool_name}，可用工具: {list(TOOL_FUNCTIONS)}"
+        )
 
     try:
         return fn(**args)
     except TypeError as e:
         logger.exception("工具参数错误: %s(%s)", tool_name, args)
-        return (
-            f"[{tool_name} ARGUMENT ERROR] {e}\n"
-            f"收到参数: {args}\n"
-            f"请检查工具 schema，并使用正确参数调用。"
-        )
-
+        raise TypeError(
+            f"{tool_name} 参数错误: {e}; 收到参数: {args}"
+        ) from e
 
 # ===========================================================================
 # Tool Schema
 # ===========================================================================
-
 RETRIEVAL_TOOLS = [
     {
         "type": "function",
@@ -603,7 +855,7 @@ RETRIEVAL_TOOLS = [
             "description": (
                 "【混合检索（推荐首选）】根据自然语言 query 找到最相关的函数、类或文件节点。\n"
                 "当前推荐作为定位入口：先用 search_hybrid 找 seed nodes，再用 search_structural 对已知 node_id 做关系扩展。\n"
-                "每个结果会尽量包含节点ID、文件路径、行号、结构关系依据和语义关联说明。\n"
+                "每个结果会尽量包含节点ID、文件路径、行号、结构关系依据、语义关联说明和 BM25 词法命中信息。\n"
                 "注意：初始状态为骨架图；如果需要方法级细节或调用边，请用 deepen_file 深化相关文件。"
             ),
             "parameters": {
@@ -635,8 +887,10 @@ RETRIEVAL_TOOLS = [
                 "- 创建方法节点和更细粒度函数节点\n"
                 "- 分析函数调用关系\n"
                 "- 自动更新语义索引\n"
+                "- 自动更新 BM25 词法索引\n"
                 "- 刷新结构关系索引\n"
-                "- 返回新增方法列表和可进一步深化的关联文件\n\n"
+                "- 返回新增方法列表和可进一步深化的关联文件\n"
+                "- 如果存在 issue_query 或 issue_focus/query_focus，可返回 issue-related method summary\n\n"
                 "每次任务最多深化 20 个文件。建议只深化与 issue 最相关的文件。\n"
                 "推荐工作流：search_hybrid → deepen_file → bash 读源码 → search_structural 扩展相关节点。"
             ),
@@ -651,9 +905,26 @@ RETRIEVAL_TOOLS = [
                             "请只传文件路径部分。"
                         ),
                     },
+                    "issue_query": {
+                        "type": "string",
+                        "description": (
+                            "可选。当前 issue、当前检索 query 或与该文件相关的行为描述。"
+                            "用于深化后生成 issue-related method summary。"
+                            "如果不传，系统会从 issue_focus/query_focus/SWE_ISSUE_TEXT 自动补全。"
+                        ),
+                    },
+                    "top_methods": {
+                        "type": "integer",
+                        "description": (
+                            "可选。返回 issue-related method summary 的种子方法数量，默认 5。"
+                            "值越大，method summary 覆盖越多，但输出也会更长。"
+                        ),
+                        "default": 5,
+                    },
                 },
                 "required": ["file_path"],
             },
         },
     },
 ]
+

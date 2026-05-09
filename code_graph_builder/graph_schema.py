@@ -61,13 +61,41 @@ class CodeNode:
 
     @classmethod
     def from_dict(cls, d: dict) -> "CodeNode":
+        """
+        从 graph node attrs 恢复 CodeNode。
+
+        注意：
+        SkeletonBuilder / FileDeepener 可能会向 NetworkX 节点写入一些
+        CodeNode dataclass 尚未正式声明的附加字段，例如：
+        decorators, class_bases, base_names, method_summaries,
+        unresolved_bases, import_aliases, from_import_aliases, parse_error
+
+        这些字段可以保存在 graph node attrs 中，供特定模块按需读取；
+        但恢复 CodeNode 时应忽略未知字段，避免：
+        TypeError: CodeNode.__init__() got an unexpected keyword argument ...
+        """
         d = d.copy()
-        d["type"] = NodeType(d["type"])
+
+        if "type" in d and not isinstance(d["type"], NodeType):
+            d["type"] = NodeType(d["type"])
+
         # 兼容旧数据：缺失的新字段使用默认值
-        for key, default in [("method_names", []), ("signature", ""), ("docstring", "")]:
+        defaults = {
+            "method_names": [],
+            "signature": "",
+            "docstring": "",
+            "code_text": "",
+            "comment": "",
+        }
+        for key, default in defaults.items():
             if key not in d:
                 d[key] = default
-        return cls(**d)
+
+        # 关键防护：忽略 CodeNode 未声明的附加字段
+        field_names = set(cls.__dataclass_fields__.keys())
+        safe = {k: v for k, v in d.items() if k in field_names}
+
+        return cls(**safe)
 
     def skeleton_embedding_text(self) -> str:
         """生成骨架模式下的紧凑 embedding 文本。"""

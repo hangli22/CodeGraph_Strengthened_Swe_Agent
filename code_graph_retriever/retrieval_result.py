@@ -16,7 +16,7 @@ retrieval_result.py — 检索结果统一数据结构
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -79,11 +79,15 @@ class RetrievalResult:
     # ── 检索分数 ──────────────────────────────────────────
     structural_score: float = 0.0   # 结构相似度 [0, 1]
     semantic_score:   float = 0.0   # 语义相似度 [0, 1]
+    bm25_score:       float = 0.0   # BM25 词法/符号匹配分 [0, 1]
     final_score:      float = 0.0   # 加权融合分 [0, 1]
 
     # ── 原因分析（对应论文 3.4.2）────────────────────────
     structural_reason:  str = ""   # 结构匹配依据
     semantic_reason:    str = ""   # 语义关联说明
+    bm25_reason:        str = ""   # BM25 词法命中说明
+    bm25_hit_queries:   List[str] = field(default_factory=list)  # 命中的 BM25 查询
+    bm25_query_groups:  Dict[str, Any] = field(default_factory=dict)  # 命中的 query group 信息
     position_summary:   str = ""   # 结构位置摘要（自然语言）
 
     # ── 结构位置详情 ──────────────────────────────────────
@@ -98,12 +102,17 @@ class RetrievalResult:
             f"## {self.qualified_name}  [{self.node_type}]",
             f"文件: {self.file}  行: {self.start_line}~{self.end_line}",
             f"综合评分: {self.final_score:.3f}  "
-            f"（结构: {self.structural_score:.3f} | 语义: {self.semantic_score:.3f}）",
+            f"（结构: {self.structural_score:.3f} | 语义: {self.semantic_score:.3f} | BM25: {self.bm25_score:.3f}）",
         ]
         if self.structural_reason:
             lines.append(f"结构匹配依据: {self.structural_reason}")
         if self.semantic_reason:
             lines.append(f"语义关联说明: {self.semantic_reason}")
+        if self.bm25_reason:
+            lines.append(f"BM25词法命中: {self.bm25_reason}")
+        if self.bm25_hit_queries:
+            hit_q = ", ".join(self.bm25_hit_queries[:5])
+            lines.append(f"BM25命中查询: {hit_q}")
         if self.position_summary:
             lines.append(f"结构位置: {self.position_summary}")
         if self.comment:
@@ -117,7 +126,8 @@ class RetrievalResult:
         return (f"RetrievalResult({self.qualified_name!r}, "
                 f"final={self.final_score:.3f}, "
                 f"struct={self.structural_score:.3f}, "
-                f"sem={self.semantic_score:.3f})")
+                f"sem={self.semantic_score:.3f}, "
+                f"bm25={self.bm25_score:.3f})")
 
 
 @dataclass

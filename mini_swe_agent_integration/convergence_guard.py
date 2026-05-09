@@ -1,0 +1,612 @@
+"""
+convergence_guard.py — RetrievalAgent 的步数提醒与收敛控制
+=========================================================
+
+职责：
+  - 多 tool call 硬拦截
+  - 每 N 步生成 progress notice
+  - 30 步后阻止 broad search
+  - 45 步后只允许 edit / focused test / small range read / git diff
+  - 找到直接错误位置后，最多再允许 5 次 inspection/search
+  - 记录收敛相关状态，供 trajectory serialize 使用
+
+注意：
+  - 这个模块不执行工具，只判断 action 是否允许。
+  - 这个模块不依赖 mini-swe-agent 内部类型，只操作 dict。
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
+
+
+MakeOutputFn = Callable[[str, int, str], dict]
+IsGitDiffCommandFn = Callable[[str], bool]
+
+
+class ConvergenceGuard:
+    """
+    RetrievalAgent 的收敛控制器。
+
+    Parameters
+    ----------
+    make_output:
+        RetrievalAgent._make_output，用于构造 observation output。
+    is_git_diff_command:
+        RetrievalAgent._is_git_diff_command，用于判断有效 visible working-tree diff。
+    step_notice_interval:
+        每多少步追加一次 progress notice。
+    """
+
+    def __init__(
+        self,
+        *,
+        make_output: MakeOutputFn,
+        is_git_diff_command: IsGitDiffCommandFn,
+        step_notice_interval: int = 10,
+    ):
+        self._make_output = make_output
+        self._is_git_diff_command = is_git_diff_command
+
+        self.interaction_step_count: int = 0
+        self.step_notice_interval: int = step_notice_interval
+
+        self.source_edit_count: int = 0
+        self.direct_error_location_found: bool = False
+        self.direct_error_location_step: Optional[int] = None
+        self.post_error_location_inspection_count: int = 0
+
+    # ------------------------------------------------------------------
+    # Multi tool-call guard
+    # ------------------------------------------------------------------
+
+    def guard_multiple_tool_calls(self, message: dict, actions: list[dict]) -> list[dict] | None:
+        """
+        如果一轮 assistant response 中出现多个 tool call，直接拒绝。
+
+        返回：
+          - None：没有违反多 tool call 约束
+          - list[dict]：policy error outputs，数量与 parsed actions 对齐
+        """
+        raw_tool_call_count = self.count_raw_tool_calls(message)
+        parsed_action_count = len(actions)
+
+        if raw_tool_call_count <= 1 and parsed_action_count <= 1:
+            return None
+
+        msg = self.make_multi_tool_call_block_message(
+            raw_tool_call_count=raw_tool_call_count,
+            parsed_action_count=parsed_action_count,
+        )
+
+        # 尽量与 parsed actions 数量对齐，避免 assistant tool_calls 和 tool observations 数量不一致。
+        output_count = max(1, parsed_action_count)
+        return [
+            self._make_output(msg, 1, "")
+            for _ in range(output_count)
+        ]
+
+    @staticmethod
+    def count_raw_tool_calls(message: dict) -> int:
+        """
+        统计 raw tool_calls 数量。
+
+        需要同时看：
+          - message["tool_calls"]
+          - message["extra"]["response"].choices[0].message.tool_calls
+          - message["extra"]["response"]["choices"][0]["message"]["tool_calls"]
+
+        因为不同模型/SDK 包装形式不同。
+        """
+        counts: list[int] = []
+
+        try:
+            tool_calls = message.get("tool_calls") or []
+            if tool_calls:
+                counts.append(len(tool_calls))
+        except Exception:
+            pass
+
+        response = (message.get("extra") or {}).get("response")
+
+        try:
+            choices = getattr(response, "choices", None)
+            if choices:
+                raw_msg = choices[0].message
+                raw_tool_calls = getattr(raw_msg, "tool_calls", None) or []
+                if raw_tool_calls:
+                    counts.append(len(raw_tool_calls))
+        except Exception:
+            pass
+
+        try:
+            choices = response.get("choices", []) if response else []
+            if choices:
+                raw_msg = choices[0].get("message", {}) or {}
+                raw_tool_calls = raw_msg.get("tool_calls") or []
+                if raw_tool_calls:
+                    counts.append(len(raw_tool_calls))
+        except Exception:
+            pass
+
+        return max(counts) if counts else 0
+
+    @staticmethod
+    def make_multi_tool_call_block_message(
+        raw_tool_call_count: int,
+        parsed_action_count: int,
+    ) -> str:
+        return (
+            "[policy error] Multiple tool calls were detected in one assistant response, "
+            "so no tool call was executed.\n\n"
+            f"raw_tool_call_count={raw_tool_call_count}, "
+            f"parsed_action_count={parsed_action_count}\n\n"
+            "You must retry with exactly ONE tool call in the next assistant response.\n"
+            "Do not call a retrieval tool and bash in the same turn.\n"
+            "Do not make parallel tool calls.\n"
+            "If you need multiple actions, perform them across multiple turns.\n"
+        )
+
+    # ------------------------------------------------------------------
+    # Step notice
+    # ------------------------------------------------------------------
+
+    def advance_step_and_maybe_make_notice(self) -> str:
+        """
+        每完成一轮 assistant tool action，交互步数 +1。
+
+        当步数达到 10、20、30... 时，返回 progress notice。
+        """
+        self.interaction_step_count += 1
+
+        if self.step_notice_interval <= 0:
+            return ""
+
+        if self.interaction_step_count % self.step_notice_interval != 0:
+            return ""
+
+        return self.make_step_notice_message(self.interaction_step_count)
+
+    @staticmethod
+    def make_step_notice_message(step_count: int) -> str:
+        if step_count >= 45:
+            stage = (
+                "You are at or beyond step 45. Convergence mode is now strict. "
+                "Only these actions are allowed: make a source edit, run a focused reproduction/test, "
+                "inspect one small line range, or inspect git diff. Do not use retrieval tools, broad grep, "
+                "broad search, or full-file reads."
+            )
+        elif step_count >= 30:
+            stage = (
+                "You are at or beyond step 30. Broad search is now blocked. "
+                "Do not use search_hybrid/search_semantic/search_structural/deepen_file, broad grep, "
+                "or full-file reads. Choose a concrete convergence action."
+            )
+        else:
+            stage = (
+                "Reassess progress now. If you have already found the likely source file, "
+                "relevant tests, or the function that directly implements the reported behavior, "
+                "do not keep broadening the search."
+            )
+
+        return (
+            "\n\n[progress notice]\n"
+            f"已经交互了 {step_count} 步。\n"
+            f"You have interacted for {step_count} steps.\n\n"
+            f"{stage}\n\n"
+            "Recommended next actions: run a focused reproduction, inspect one small missing code range, "
+            "make a minimal source edit, run git diff, or submit if the final non-empty diff has already been inspected.\n"
+        )
+
+    @staticmethod
+    def append_notice_to_outputs(outputs: list[dict], notice: str) -> None:
+        """
+        将 step notice 追加到最后一个 observation output 中。
+
+        不单独新增 output，避免破坏 actions/observations 对齐。
+        """
+        if not notice:
+            return
+
+        if not outputs:
+            outputs.append({
+                "output": notice,
+                "returncode": 0,
+                "exception_info": "",
+            })
+            return
+
+        last = outputs[-1]
+        last["output"] = f"{last.get('output', '')}{notice}"
+
+    # ------------------------------------------------------------------
+    # Convergence policy
+    # ------------------------------------------------------------------
+
+    def guard_action(self, action: dict) -> dict | None:
+        """
+        根据当前 step 和定位状态，阻止低收益探索。
+
+        规则：
+          - 30 步后禁止 broad search。
+          - 45 步后只允许 edit / focused test / small range read / git diff。
+          - 找到直接错误行后最多再查 5 步；之后必须 edit 或加测试。
+        """
+        step = self.interaction_step_count + 1
+
+        if step >= 45 and not self.is_allowed_after_step_45(action):
+            return self._make_output(
+                self.make_step_45_block_message(action),
+                1,
+                "",
+            )
+
+        if step >= 30 and self.is_broad_search_action(action):
+            return self._make_output(
+                self.make_step_30_broad_search_block_message(action),
+                1,
+                "",
+            )
+
+        if self.direct_error_location_found:
+            if self.is_inspection_or_search_action(action) and not self.is_source_edit_or_test_or_diff_action(action):
+                if self.post_error_location_inspection_count >= 5:
+                    return self._make_output(
+                        self.make_direct_error_convergence_block_message(action),
+                        1,
+                        "",
+                    )
+                self.post_error_location_inspection_count += 1
+
+        return None
+
+    def update_after_outputs(self, action: dict, outputs: list[dict]) -> None:
+        """
+        根据本轮 action 和 observation 更新收敛状态。
+        """
+        for output in outputs:
+            self.update_direct_error_location_state(action, output)
+
+    def update_direct_error_location_state(self, action: dict, output: dict) -> None:
+        """
+        根据 observation 判断是否已经找到了直接错误位置。
+
+        注意：
+          - 不因为 tests/ 里的 Error(...) 单独触发。
+          - 优先在源码文件 django/ 或 grep 输出中的 django/*.py 行触发。
+          - policy error 本身不触发。
+        """
+        if self.direct_error_location_found:
+            return
+
+        text = str(output.get("output", "") or "")
+        if not text:
+            return
+
+        if text.lstrip().startswith("[policy error]"):
+            return
+
+        command = ""
+        if "command" in action:
+            command = str(action.get("command") or "")
+
+        command_targets_tests = self._command_targets_tests(command)
+        command_targets_source = self._command_targets_source(command)
+        output_points_to_source = self._output_points_to_source_file(text)
+
+        # 读测试时，不因为 Error(...) / checks.Error(...) 直接触发。
+        if command_targets_tests and not command_targets_source and not output_points_to_source:
+            return
+
+        strong_patterns = [
+            r"\bid=['\"][a-zA-Z_]+\.E\d+['\"]",
+            r"\bmodels\.E\d+\b",
+            r"\bfields\.E\d+\b",
+            r"\badmin\.E\d+\b",
+            r"db_table .* is used by multiple models",
+            r"is used by multiple models",
+            r"Traceback \(most recent call last\)",
+            r"AssertionError",
+            r"FAILED",
+        ]
+
+        if not any(re.search(p, text) for p in strong_patterns):
+            return
+
+        # 如果是源码范围读取，或者 grep 输出直接指向源码文件，认为找到直接错误位置。
+        if command_targets_source or output_points_to_source:
+            self.direct_error_location_found = True
+            self.direct_error_location_step = self.interaction_step_count
+            self.post_error_location_inspection_count = 0
+            logger.info(
+                "检测到直接错误/失败位置，step=%s",
+                self.direct_error_location_step,
+            )
+
+    @staticmethod
+    def _command_targets_tests(command: str) -> bool:
+        return bool(re.search(r"(^|\s)(tests?/|tests\b)", command))
+
+    @staticmethod
+    def _command_targets_source(command: str) -> bool:
+        # 当前主要面向 Django；其他仓库则通过 output_points_to_source_file 辅助触发。
+        return bool(re.search(r"(^|\s)(django/|django\b)", command))
+
+    @staticmethod
+    def _output_points_to_source_file(text: str) -> bool:
+        # grep 输出形如 django/core/checks/model_checks.py:45:
+        return bool(re.search(r"(^|\n)\.?/?[A-Za-z0-9_./-]+\.py:\d+:", text)) and not bool(
+            re.search(r"(^|\n)\.?/?tests?/", text)
+        ) or bool(re.search(r"(^|\n)\.?/?django/[A-Za-z0-9_./-]+\.py:\d+:", text))
+
+    def is_allowed_after_step_45(self, action: dict) -> bool:
+        """
+        45 步后只允许：
+          - source edit
+          - focused reproduction/test
+          - small range read
+          - git diff
+        """
+        if "tool_name" in action:
+            return False
+
+        command = (action.get("command") or "").strip()
+        if not command:
+            return False
+
+        return (
+            self.is_likely_source_edit_command(command)
+            or self.is_focused_test_or_reproduction_command(command)
+            or self.is_small_range_read_command(command)
+            or self._is_git_diff_command(command)
+        )
+
+    def is_broad_search_action(self, action: dict) -> bool:
+        """
+        判断是否是 30 步后应阻止的 broad search。
+        """
+        if "tool_name" in action:
+            tool_name = action.get("tool_name")
+            return tool_name in {
+                "search_hybrid",
+                "search_semantic",
+                "search_structural",
+                "deepen_file",
+            }
+
+        command = (action.get("command") or "").strip()
+        if not command:
+            return False
+
+        return self.is_broad_grep_command(command) or self.is_broad_read_command(command)
+
+    def is_inspection_or_search_action(self, action: dict) -> bool:
+        if "tool_name" in action:
+            return action.get("tool_name") in {
+                "search_hybrid",
+                "search_semantic",
+                "search_structural",
+                "deepen_file",
+            }
+
+        command = (action.get("command") or "").strip()
+        if not command:
+            return False
+
+        lowered = command.lower()
+        return (
+            "grep" in lowered
+            or "find " in lowered
+            or " rg " in f" {lowered} "
+            or "nl -ba" in lowered
+            or re.search(r"(^|&&)\s*cat\s+", lowered) is not None
+            or "sed -n" in lowered
+        )
+
+    def is_source_edit_or_test_or_diff_action(self, action: dict) -> bool:
+        if "tool_name" in action:
+            return False
+
+        command = (action.get("command") or "").strip()
+        if not command:
+            return False
+
+        return (
+            self.is_likely_source_edit_command(command)
+            or self.is_focused_test_or_reproduction_command(command)
+            or self._is_git_diff_command(command)
+        )
+
+    @staticmethod
+    def is_broad_grep_command(command: str) -> bool:
+        """
+        broad grep: 搜索范围太大，30 步后禁止。
+        """
+        c = command.strip()
+
+        if not re.search(r"\bgrep\b", c):
+            return False
+
+        broad_targets = [
+            r"\s\.\s",
+            r"\s\.$",
+            r"\sdjango/?\s",
+            r"\sdjango/?$",
+            r"\stests/?\s",
+            r"\stests/?$",
+            r"--include=.*\*\.",
+        ]
+
+        if any(re.search(p, c) for p in broad_targets):
+            return True
+
+        if re.search(r"\bgrep\s+-[^\n]*[rR][^\n]*\s+.+\s+(\.|django/?|tests/?)\b", c):
+            return True
+
+        return False
+
+    @staticmethod
+    def is_broad_read_command(command: str) -> bool:
+        """
+        full-file read: 读整文件，30 步后禁止。
+        """
+        c = command.strip()
+
+        if re.search(r"(^|&&|\|\|)\s*cat\s+[^|><;&]+\.py\b", c):
+            return True
+
+        if re.search(r"\bnl\s+-ba\s+[^|><;&]+\.py\b", c) and "sed -n" not in c:
+            return True
+
+        return False
+
+    @staticmethod
+    def is_small_range_read_command(command: str) -> bool:
+        """
+        允许的小范围读取：
+          nl -ba file.py | sed -n '10,120p'
+
+        要求范围最多 140 行。
+        """
+        c = command.strip()
+
+        m = re.search(
+            r"nl\s+-ba\s+[^|><;&]+\.py\s*\|\s*sed\s+-n\s+['\"]?(\d+),(\d+)p['\"]?",
+            c,
+        )
+        if not m:
+            return False
+
+        start = int(m.group(1))
+        end = int(m.group(2))
+        return 0 < start <= end and (end - start) <= 140
+
+    @staticmethod
+    def is_focused_test_or_reproduction_command(command: str) -> bool:
+        """
+        允许的 focused test / reproduction。
+        """
+        c = command.strip()
+        lowered = c.lower()
+
+        if re.search(r"\bpytest\b", lowered):
+            return "::" in c or re.search(r"\btests?/[^ ]+\.py\b", c) is not None
+
+        if re.search(r"\bpython(?:3)?\s+tests/runtests\.py\b", lowered):
+            return True
+
+        if re.search(r"\bpython(?:3)?\s+-m\s+pytest\b", lowered):
+            return "::" in c or re.search(r"\btests?/[^ ]+\.py\b", c) is not None
+
+        if re.search(r"\bpython(?:3)?\s+manage\.py\s+test\b", lowered):
+            return True
+
+        # heredoc Python reproduction，不一定是 edit。
+        if re.search(r"\bpython(?:3)?\s+<<['\"]?PY", c):
+            return True
+
+        return False
+
+    @staticmethod
+    def is_likely_source_edit_command(command: str) -> bool:
+        """
+        判断是否像源码编辑命令。
+
+        收紧判断：
+          - Path( 和 .replace( 不能单独算 edit。
+          - 必须出现明确写入动作。
+        """
+        c = command.strip()
+
+        if re.search(r"\bpython(?:3)?\s+<<['\"]?PY", c):
+            write_markers = [
+                ".write_text(",
+                ".write_bytes(",
+                ".writelines(",
+                ".write(",
+                "writelines(",
+            ]
+            if any(marker in c for marker in write_markers):
+                return True
+
+            if re.search(r"open\s*\([^)]*,\s*['\"][wax]\+?['\"]", c):
+                return True
+
+            return False
+
+        if re.search(r"\bapply_patch\b", c):
+            return True
+
+        if re.search(r"\bgit\s+apply\b", c):
+            return True
+
+        return False
+
+    def record_source_edit_if_successful(self, command: str, result: dict) -> None:
+        if (
+            self.is_likely_source_edit_command(command)
+            and int(result.get("returncode", 0) or 0) == 0
+        ):
+            self.source_edit_count += 1
+
+    @staticmethod
+    def make_step_30_broad_search_block_message(action: dict) -> str:
+        return (
+            "[policy error] Broad search is blocked at step 30 or later.\n\n"
+            "You have spent enough steps locating the issue. Do not continue broad search, broad grep, "
+            "repeated retrieval, or full-file reads.\n\n"
+            "Next action must be more concrete: inspect one small missing line range, run a focused reproduction/test, "
+            "make a minimal source edit, or inspect git diff.\n\n"
+            f"Blocked action: {action}"
+        )
+
+    @staticmethod
+    def make_step_45_block_message(action: dict) -> str:
+        return (
+            "[policy error] At step 45 or later, only convergence actions are allowed.\n\n"
+            "Allowed actions:\n"
+            "1. Make a minimal source edit.\n"
+            "2. Run a focused reproduction or focused test.\n"
+            "3. Inspect one small line range with `nl -ba file.py | sed -n 'start,endp'`.\n"
+            "4. Inspect visible working-tree diff with `cd \"$REPO_ROOT\" && git diff`.\n\n"
+            "Do not call retrieval tools, broad grep, broad search, or full-file reads now.\n\n"
+            f"Blocked action: {action}"
+        )
+
+    @staticmethod
+    def make_direct_error_convergence_block_message(action: dict) -> str:
+        return (
+            "[policy error] The direct error-emitting location or failing behavior has already been found, "
+            "and 5 additional inspection/search actions have been used.\n\n"
+            "You must now make a minimal source edit or add a focused regression test. "
+            "Do not continue searching the same concept.\n\n"
+            f"Blocked action: {action}"
+        )
+
+    # ------------------------------------------------------------------
+    # Serialization
+    # ------------------------------------------------------------------
+
+    def serialize_state(self) -> dict:
+        return {
+            "interaction_step_count": self.interaction_step_count,
+            "step_notice_interval": self.step_notice_interval,
+            "source_edit_count": self.source_edit_count,
+            "direct_error_location_found": self.direct_error_location_found,
+            "direct_error_location_step": self.direct_error_location_step,
+            "post_error_location_inspection_count": self.post_error_location_inspection_count,
+        }
+
+    @staticmethod
+    def guardrail_flags() -> dict:
+        return {
+            "step_notice_every_10_turns": True,
+            "block_multiple_tool_calls": True,
+            "block_broad_search_after_step_30": True,
+            "strict_convergence_after_step_45": True,
+            "force_edit_or_test_after_direct_error_location": True,
+        }

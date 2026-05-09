@@ -14,7 +14,9 @@ from sklearn.neighbors import NearestNeighbors
 
 from code_graph_builder.graph_schema import CodeGraph, NodeType
 from .retrieval_result import RetrievalResult, RetrievalResponse
+import logging
 
+logger = logging.getLogger(__name__)
 
 class EmbeddingBackend(ABC):
     @property
@@ -31,7 +33,7 @@ class DashScopeEmbeddingBackend(EmbeddingBackend):
     BASE_URL       = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     MODEL          = "text-embedding-v3"
     EMBED_DIM      = 1024
-    BATCH_SIZE     = 25
+    BATCH_SIZE     = 10
     MAX_TEXT_CHARS = 2000
     BATCH_INTERVAL = 0.2
     MAX_RETRIES    = 3
@@ -88,12 +90,49 @@ class DashScopeEmbeddingBackend(EmbeddingBackend):
                 resp = client.embeddings.create(
                     model=self.model,
                     input=batch,
-                    encoding_format="float",
                 )
             except Exception as e:
+                err_msg = str(e)
+                err_type = type(e).__name__
+
+                # OpenAI SDK 的异常对象通常会带 response / status_code / body 等信息。
+                status_code = getattr(e, "status_code", None)
+                response = getattr(e, "response", None)
+                body = getattr(e, "body", None)
+
+                response_text = ""
+                if response is not None:
+                    try:
+                        response_text = response.text
+                    except Exception:
+                        response_text = ""
+
+                # 打印当前 batch 的基本信息，方便判断是否是空文本、超长文本或 batch 太大。
+                lengths = [len(t) for t in batch]
+                empty_count = sum(1 for t in batch if not t.strip())
+                preview = batch[0][:300].replace("\n", "\\n") if batch else ""
+
+                logger.error(
+                    "DashScope Embedding 原始异常: type=%s status_code=%s error=%s body=%s response=%s "
+                    "model=%s base_url=%s batch_size=%d empty_count=%d min_len=%s max_len=%s first_text_preview=%r",
+                    err_type,
+                    status_code,
+                    err_msg,
+                    body,
+                    response_text,
+                    self.model,
+                    self.BASE_URL,
+                    len(batch),
+                    empty_count,
+                    min(lengths) if lengths else None,
+                    max(lengths) if lengths else None,
+                    preview,
+                )
+
                 raise RuntimeError(
                     f"DashScope Embedding 调用失败: model={self.model}, "
-                    f"base_url={self.BASE_URL}, batch_size={len(batch)}"
+                    f"base_url={self.BASE_URL}, batch_size={len(batch)}, "
+                    f"error_type={err_type}, status_code={status_code}, error={err_msg}"
                 ) from e
 
             items = sorted(resp.data, key=lambda x: x.index)
