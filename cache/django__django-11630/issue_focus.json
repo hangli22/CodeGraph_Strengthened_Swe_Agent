@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "instance_id": "django__django-11630",
+  "updated_at": 1778334200.0258586,
+  "initial_issue_focus": {
+    "source_type": "initial_issue",
+    "source_text": "Django throws error when different apps with different models have the same name table name.\nDescription\n\t\nError message:\ntable_name: (models.E028) db_table 'table_name' is used by multiple models: base.ModelName, app2.ModelName.\nWe have a Base app that points to a central database and that has its own tables. We then have multiple Apps that talk to their own databases. Some share the same table names.\nWe have used this setup for a while, but after upgrading to Django 2.2 we're getting an error saying we're not allowed 2 apps, with 2 different models to have the same table names. \nIs this correct behavior? We've had to roll back to Django 2.0 for now.",
+    "exact_symbols": [
+      "models.E028",
+      "db_table"
+    ],
+    "file_hints": [],
+    "class_hints": [
+      "ModelName"
+    ],
+    "function_hints": [],
+    "method_hints": [],
+    "parameter_hints": [
+      "db_table"
+    ],
+    "behavior_terms": [
+      "same table name across apps",
+      "multiple models sharing db_table"
+    ],
+    "error_terms": [
+      "models.E028",
+      "db_table 'table_name' is used by multiple models"
+    ],
+    "bm25_queries": [
+      "models.E028 db_table duplicate",
+      "same table name multiple models",
+      "db_table used by multiple models error"
+    ],
+    "raw_keywords": [
+      "table_name",
+      "duplicate table name",
+      "multiple apps same table"
+    ],
+    "raw_llm_response": "{\n  \"exact_symbols\": [\"models.E028\", \"db_table\"],\n  \"file_hints\": [],\n  \"class_hints\": [\"ModelName\"],\n  \"function_hints\": [],\n  \"method_hints\": [],\n  \"parameter_hints\": [\"db_table\"],\n  \"behavior_terms\": [\"same table name across apps\", \"multiple models sharing db_table\"],\n  \"error_terms\": [\"models.E028\", \"db_table 'table_name' is used by multiple models\"],\n  \"bm25_queries\": [\n    \"models.E028 db_table duplicate\",\n    \"same table name multiple models\",\n    \"db_table used by multiple models error\"\n  ],\n  \"raw_keywords\": [\"table_name\", \"duplicate table name\", \"multiple apps same table\"]\n}",
+    "extractor": "llm",
+    "created_at": 1778333462.120997
+  },
+  "query_focus": {
+    "source_type": "query",
+    "source_text": "db_table is used by multiple models E028 validation error",
+    "exact_symbols": [
+      "db_table"
+    ],
+    "file_hints": [],
+    "class_hints": [],
+    "function_hints": [],
+    "method_hints": [],
+    "parameter_hints": [
+      "db_table"
+    ],
+    "behavior_terms": [
+      "multiple models validation error"
+    ],
+    "error_terms": [
+      "E028 validation error"
+    ],
+    "bm25_queries": [
+      "db_table E028",
+      "E028 validation error",
+      "db_table multiple models"
+    ],
+    "raw_keywords": [
+      "validation",
+      "multiple models"
+    ],
+    "raw_llm_response": "```json\n{\n  \"exact_symbols\": [\"db_table\"],\n  \"file_hints\": [],\n  \"class_hints\": [],\n  \"function_hints\": [],\n  \"method_hints\": [],\n  \"parameter_hints\": [\"db_table\"],\n  \"behavior_terms\": [\"multiple models validation error\"],\n  \"error_terms\": [\"E028 validation error\"],\n  \"bm25_queries\": [\n    \"db_table E028\",\n    \"E028 validation error\",\n    \"db_table multiple models\"\n  ],\n  \"raw_keywords\": [\"validation\", \"multiple models\"]\n}\n```",
+    "extractor": "llm",
+    "created_at": 1778334200.0257673
+  }
+}

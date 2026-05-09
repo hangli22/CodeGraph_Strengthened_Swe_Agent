@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "instance_id": "django__django-11797",
+  "updated_at": 1778337532.4544687,
+  "initial_issue_focus": {
+    "source_type": "initial_issue",
+    "source_text": "Filtering on query result overrides GROUP BY of internal query\nDescription\n\t\nfrom django.contrib.auth import models\na = models.User.objects.filter(email__isnull=True).values('email').annotate(m=Max('id')).values('m')\nprint(a.query) # good\n# SELECT MAX(\"auth_user\".\"id\") AS \"m\" FROM \"auth_user\" WHERE \"auth_user\".\"email\" IS NULL GROUP BY \"auth_user\".\"email\"\nprint(a[:1].query) # good\n# SELECT MAX(\"auth_user\".\"id\") AS \"m\" FROM \"auth_user\" WHERE \"auth_user\".\"email\" IS NULL GROUP BY \"auth_user\".\"email\" LIMIT 1\nb = models.User.objects.filter(id=a[:1])\nprint(b.query) # GROUP BY U0.\"id\" should be GROUP BY U0.\"email\"\n# SELECT ... FROM \"auth_user\" WHERE \"auth_user\".\"id\" = (SELECT U0.\"id\" FROM \"auth_user\" U0 WHERE U0.\"email\" IS NULL GROUP BY U0.\"id\" LIMIT 1)",
+    "exact_symbols": [
+      "filter",
+      "values",
+      "annotate",
+      "GROUP BY"
+    ],
+    "file_hints": [],
+    "class_hints": [
+      "User",
+      "Max"
+    ],
+    "function_hints": [],
+    "method_hints": [
+      "filter",
+      "values",
+      "annotate"
+    ],
+    "parameter_hints": [
+      "email__isnull",
+      "id"
+    ],
+    "behavior_terms": [
+      "filtering overrides group by",
+      "GROUP BY column changed",
+      "internal query"
+    ],
+    "error_terms": [
+      "GROUP BY U0.\"id\" should be GROUP BY U0.\"email\""
+    ],
+    "bm25_queries": [
+      "filter override group by",
+      "GROUP BY internal query",
+      "values annotate filter subquery",
+      "GROUP BY email id subquery"
+    ],
+    "raw_keywords": [
+      "subquery",
+      "GROUP BY",
+      "override",
+      "internal query"
+    ],
+    "raw_llm_response": "{\n  \"exact_symbols\": [\"filter\", \"values\", \"annotate\", \"GROUP BY\"],\n  \"file_hints\": [],\n  \"class_hints\": [\"User\", \"Max\"],\n  \"function_hints\": [],\n  \"method_hints\": [\"filter\", \"values\", \"annotate\"],\n  \"parameter_hints\": [\"email__isnull\", \"id\"],\n  \"behavior_terms\": [\"filtering overrides group by\", \"GROUP BY column changed\", \"internal query\"],\n  \"error_terms\": [\"GROUP BY U0.\\\"id\\\" should be GROUP BY U0.\\\"email\\\"\"],\n  \"bm25_queries\": [\n    \"filter override group by\",\n    \"GROUP BY internal query\",\n    \"values annotate filter subquery\",\n    \"GROUP BY email id subquery\"\n  ],\n  \"raw_keywords\": [\"subquery\", \"GROUP BY\", \"override\", \"internal query\"]\n}",
+    "extractor": "llm",
+    "created_at": 1778336693.0081549
+  },
+  "query_focus": {
+    "source_type": "query",
+    "source_text": "values annotate group by subquery filter override GROUP BY column",
+    "exact_symbols": [
+      "GROUP BY"
+    ],
+    "file_hints": [],
+    "class_hints": [],
+    "function_hints": [],
+    "method_hints": [],
+    "parameter_hints": [],
+    "behavior_terms": [
+      "values annotate group by subquery filter override"
+    ],
+    "error_terms": [],
+    "bm25_queries": [
+      "annotate override GROUP BY",
+      "values subquery filter group by",
+      "group by column subquery"
+    ],
+    "raw_keywords": [
+      "values",
+      "annotate",
+      "subquery",
+      "filter",
+      "override",
+      "GROUP BY",
+      "column"
+    ],
+    "raw_llm_response": "```json\n{\n  \"exact_symbols\": [\"GROUP BY\"],\n  \"file_hints\": [],\n  \"class_hints\": [],\n  \"function_hints\": [],\n  \"method_hints\": [],\n  \"parameter_hints\": [],\n  \"behavior_terms\": [\"values annotate group by subquery filter override\"],\n  \"error_terms\": [],\n  \"bm25_queries\": [\n    \"annotate override GROUP BY\",\n    \"values subquery filter group by\",\n    \"group by column subquery\"\n  ],\n  \"raw_keywords\": [\"values\", \"annotate\", \"subquery\", \"filter\", \"override\", \"GROUP BY\", \"column\"]\n}\n```",
+    "extractor": "llm",
+    "created_at": 1778337532.454386
+  }
+}
