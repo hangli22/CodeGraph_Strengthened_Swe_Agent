@@ -22,6 +22,30 @@ file_deepener.py — 单文件按需深化
   - CALLS 解析仍是轻量静态分析，不是完整 Python 类型系统。
 
   why relevant 可以考虑如何优化
+
+
+
+硬伤一：deepen_file 输出仍然过长
+
+两次 deepen_file 都触发了 Output too long：
+
+tests/model_fields/test_charfield.py -> 16334 chars
+django/db/models/fields/__init__.py -> 17514 chars
+
+这会污染上下文，尤其是大文件 django/db/models/fields/__init__.py 一次深化新增 211 个方法节点，输出太大。
+
+这说明 deepen_file 现在虽然能给 method summary，但对大文件仍然太“豪放”。建议继续压缩：
+
+1. 新增方法列表最多显示 20 个，不要全量展开。
+2. method_summaries 最多显示 6~8 个。
+3. 大文件默认不展示 code_preview，除非 top similarity 很高。
+4. 对 tests 文件默认只显示匹配到的 test 方法，不显示太多关系提示。
+
+否则 agent 很容易被大量无关 method 名干扰。
+
+
+
+
 """
 
 from __future__ import annotations

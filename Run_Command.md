@@ -35,6 +35,11 @@ python mini_swe_agent_integration/run_swebench_batch.py \
 --slice后面为运行的实例编号，20:30表示第20个到第29个
 
 
-python -m swebench.harness.run_evaluation   --dataset_name princeton-nlp/SWE-bench_Lite   --split test   --predictions_path ./results/retrieval_compare_deepseek-v4-flash_20_30/preds.json   --max_workers 1   --run_id retrieval_0_11
+python -m swebench.harness.run_evaluation   --dataset_name princeton-nlp/SWE-bench_Lite   --split test   --predictions_path ./results/baseline_docker_smoke/preds.json   --max_workers 1   --run_id retrieval_0_11
 以上是评测preds的指令，注意路径名字是否正确
 
+使用docker运行完发现repos文件夹没有权限删除：
+sudo chown -R $(whoami):$(whoami) repos
+将权限改为当前用户，然后再删除
+ls -ld repos  
+确认属主
