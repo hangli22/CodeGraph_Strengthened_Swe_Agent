@@ -94,8 +94,8 @@ python - <<'PY'
 import json
 from pathlib import Path
 
-iid = "django__django-11848"
-traj = Path(f"./results/baseline_docker_smoke/{iid}/{iid}.traj.json")
+iid = "django__django-11630"
+traj = Path(f"./results/retrieval_zhou_09/{iid}/{iid}.traj.json")
 data = json.loads(traj.read_text(encoding="utf-8"))
 
 out_path = traj.parent / f"message_300_600_{iid}.md"

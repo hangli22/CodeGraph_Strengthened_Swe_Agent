@@ -183,8 +183,7 @@ class ConvergenceGuard:
         elif step_count >= 30:
             stage = (
                 "You are at or beyond step 30. Broad search is now blocked. "
-                "Do not use search_hybrid/search_semantic/search_structural/deepen_file, broad grep, "
-                "or full-file reads. Choose a concrete convergence action."
+                "Do not use search_hybrid/search_bm25/search_semantic/search_structural/deepen_file, broad grep, "                "or full-file reads. Choose a concrete convergence action."
             )
         else:
             stage = (
@@ -373,6 +372,7 @@ class ConvergenceGuard:
             tool_name = action.get("tool_name")
             return tool_name in {
                 "search_hybrid",
+                "search_bm25",
                 "search_semantic",
                 "search_structural",
                 "deepen_file",
@@ -388,6 +388,7 @@ class ConvergenceGuard:
         if "tool_name" in action:
             return action.get("tool_name") in {
                 "search_hybrid",
+                "search_bm25",
                 "search_semantic",
                 "search_structural",
                 "deepen_file",

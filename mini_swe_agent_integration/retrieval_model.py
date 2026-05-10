@@ -39,10 +39,13 @@ _TOOLCALL_FORMAT_ERROR_TEMPLATE = """\
 Format error: {{error}}
 
 You MUST include one valid tool call in your response.
-Available tools: bash, search_hybrid, deepen_file, search_semantic, search_structural.
+Available tools: bash, search_hybrid, search_bm25, deepen_file, search_semantic, search_structural.
 
 - Use `bash` for ALL shell operations: read files, edit files, run scripts, git commands, and submit.
-- Use retrieval tools to search and explore the code graph.
+- Use `search_hybrid` as the default first retrieval tool.
+- Use `search_bm25` for exact symbols, file names, function/method/class names, parameters, and error messages.
+- Use `deepen_file` after retrieval identifies a promising file and you need method-level/call-graph details.
+- Use `search_structural` only with a known node_id from previous retrieval output.
 - Do not use markdown code blocks or plain-text shell commands.
 - Natural language content is ignored; the action must be represented by a tool call.
 
