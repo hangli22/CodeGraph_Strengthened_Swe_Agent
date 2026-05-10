@@ -17,6 +17,7 @@ issue_focus.py — Issue Focus 抽取与 BM25 多路查询构造
 
 from __future__ import annotations
 
+import math
 import json
 import logging
 import os
@@ -189,11 +190,16 @@ class IssueFocusCache:
 class BM25QueryBundle:
     """
     给 BM25 使用的多路查询。
+
+    group_weights:
+        每个 query group 的 BM25 权重。
+        用于控制 initial_issue_focus / query_focus / current_query 的相对影响。
     """
 
     current_query: str = ""
     queries: List[str] = field(default_factory=list)
     query_groups: Dict[str, List[str]] = field(default_factory=dict)
+    group_weights: Dict[str, float] = field(default_factory=dict)
 
     def to_list(self) -> List[str]:
         return _dedup_clean(self.queries)
@@ -327,13 +333,19 @@ class IssueFocusStore:
         include_query_focus: bool = True,
         update_query_focus: bool = False,
         max_queries: int = 12,
+        retrieval_step: int = 0,
+        issue_start_weight: float = 1.2,
+        issue_min_weight: float = 0.3,
+        issue_decay_lambda: float = 0.25,
     ) -> BM25QueryBundle:
         """
         从 initial_issue_focus + current_query + query_focus 构造 BM25 多路查询。
 
         注意：
-          - 不把所有字段粗暴拼成一个超长 query。
-          - 而是形成多路短 query。
+        - 不把所有字段粗暴拼成一个超长 query；
+        - 而是形成多路短 query；
+        - initial_issue_focus 的 group 权重会随 retrieval_step 指数衰减；
+        - current_query / query_focus 不衰减，用于后期更相信 agent 当前线索。
         """
         if current_query and update_query_focus:
             self.update_query_focus(current_query, force=True)
@@ -370,10 +382,18 @@ class IssueFocusStore:
 
         queries = _dedup_clean(queries)[:max_queries]
 
+        group_weights = build_bm25_group_weights(
+            retrieval_step=retrieval_step,
+            issue_start_weight=issue_start_weight,
+            issue_min_weight=issue_min_weight,
+            issue_decay_lambda=issue_decay_lambda,
+        )
+
         return BM25QueryBundle(
             current_query=current_query,
             queries=queries,
             query_groups=groups,
+            group_weights=group_weights,
         )
 
     def run_bm25_search(
@@ -384,20 +404,22 @@ class IssueFocusStore:
         per_query_k: int = 50,
         include_query_focus: bool = True,
         update_query_focus: bool = False,
+        retrieval_step: int = 0,
     ):
         """
         根据 cache 中的 focus 字段运行 BM25 多路检索。
 
         bm25_retriever 需要提供：
           - search(query, top_k)
+          - search_many(queries, top_k, per_query_k, query_groups, group_weights)
 
-        如果你的 BM25Retriever 后续实现了 search_many(queries, top_k)，
-        这里会优先调用 search_many。
+        initial_issue_focus 的权重会随 retrieval_step 指数衰减。
         """
         bundle = self.build_bm25_query_bundle(
             current_query=current_query,
             include_query_focus=include_query_focus,
             update_query_focus=update_query_focus,
+            retrieval_step=retrieval_step,
         )
         queries = bundle.to_list()
 
@@ -408,9 +430,16 @@ class IssueFocusStore:
                 queries = []
 
         if hasattr(bm25_retriever, "search_many"):
-            return bm25_retriever.search_many(queries, top_k=top_k)
+            return bm25_retriever.search_many(
+                queries,
+                top_k=top_k,
+                per_query_k=per_query_k,
+                query_groups=bundle.query_groups,
+                group_weights=bundle.group_weights,
+            )
 
-        # fallback：多次 search 后按 node_id 去重融合
+        # fallback：多次 search 后按 node_id 去重融合。
+        # fallback 无法精确利用 group_weights，只保留旧逻辑。
         fused: Dict[str, Any] = {}
         best_scores: Dict[str, float] = {}
 
@@ -429,7 +458,6 @@ class IssueFocusStore:
             reverse=True,
         )[:top_k]
 
-        # 尽量复用 RetrievalResponse 类型，但不强依赖导入，避免循环引用。
         try:
             from .retrieval_result import RetrievalResponse
             return RetrievalResponse(
@@ -444,7 +472,6 @@ class IssueFocusStore:
             )
         except Exception:
             return ranked
-
 
 # ===========================================================================
 # LLM 抽取
@@ -688,9 +715,17 @@ def build_bm25_query_bundle_from_cache(
     update_query_focus: bool = False,
     backend: Optional[object] = None,
     max_queries: int = 12,
+    retrieval_step: int = 0,
+    issue_start_weight: float = 1.2,
+    issue_min_weight: float = 0.3,
+    issue_decay_lambda: float = 0.25,
 ) -> BM25QueryBundle:
     """
     便捷函数：从 cache_dir 加载 issue_focus.json 并构造 BM25 多路 query。
+
+    retrieval_step:
+        当前 instance 内第几次检索。
+        用于让 initial_issue_focus 的 BM25 group 权重指数衰减。
     """
     store = IssueFocusStore(cache_dir=cache_dir, backend=backend)
     return store.build_bm25_query_bundle(
@@ -698,8 +733,67 @@ def build_bm25_query_bundle_from_cache(
         include_query_focus=include_query_focus,
         update_query_focus=update_query_focus,
         max_queries=max_queries,
+        retrieval_step=retrieval_step,
+        issue_start_weight=issue_start_weight,
+        issue_min_weight=issue_min_weight,
+        issue_decay_lambda=issue_decay_lambda,
     )
 
+
+def build_bm25_group_weights(
+    retrieval_step: int = 0,
+    issue_start_weight: float = 1.2,
+    issue_min_weight: float = 0.3,
+    issue_decay_lambda: float = 0.25,
+) -> Dict[str, float]:
+    """
+    构造 BM25 多路查询的 group 权重。
+
+    设计目标：
+      - current_query 始终保持高权重；
+      - query_focus 来自 agent 当前检索意图，保持稳定；
+      - initial_issue_focus 来自原始 issue，随检索轮次指数衰减；
+      - initial 中的 exact symbols 衰减慢一些，behavior terms 衰减快一些。
+
+    指数衰减公式：
+        w(t) = min_w + (start_w - min_w) * exp(-lambda * t)
+
+    retrieval_step:
+        当前 instance 内第几次检索。
+        建议由 retrieval_tools / agent 层传入 retrieval_call_count。
+    """
+    t = max(0, int(retrieval_step))
+
+    base_issue_weight = issue_min_weight + (
+        issue_start_weight - issue_min_weight
+    ) * math.exp(-issue_decay_lambda * t)
+
+    # 不同 initial group 的保留强度。
+    # exact symbol 通常长期有用；behavior/query 语义词后期更容易干扰。
+    initial_exact = max(0.50, base_issue_weight * 1.10)
+    initial_method_class = max(0.40, base_issue_weight * 0.95)
+    initial_error = max(0.30, base_issue_weight * 0.85)
+    initial_bm25 = max(0.30, base_issue_weight * 0.80)
+    initial_behavior = max(0.20, base_issue_weight * 0.60)
+
+    return {
+        # 当前 agent 明确发出的检索 query，始终最高优先级之一
+        "current_query": 1.20,
+
+        # query_focus 来自当前 query，代表后续局部定位意图，不衰减
+        "query_exact_symbols": 1.20,
+        "query_method_class": 1.10,
+        "query_error": 1.00,
+        "query_bm25_queries": 1.00,
+        "query_behavior": 0.90,
+
+        # initial_issue_focus 来自原始 issue，随 retrieval_step 指数衰减
+        "initial_exact_symbols": initial_exact,
+        "initial_method_class": initial_method_class,
+        "initial_error": initial_error,
+        "initial_bm25_queries": initial_bm25,
+        "initial_behavior": initial_behavior,
+    }
 
 def _make_exact_symbol_queries(focus: IssueFocus) -> List[str]:
     queries: List[str] = []

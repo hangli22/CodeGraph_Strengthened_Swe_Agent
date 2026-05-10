@@ -29,21 +29,22 @@ logger = logging.getLogger(__name__)
 _cache: dict = {}
 MAX_DEEPEN_FILES = 20
 
-# BM25 多路查询分组权重。BM25 主要用于召回，所以这里的权重只用于
-# BM25 多路结果内部融合，不替代 semantic 的最终语义打分。
-BM25_GROUP_WEIGHTS: Dict[str, float] = {
-    "current_query": 1.00,
-    "initial_exact_symbols": 1.50,
-    "initial_method_class": 1.30,
-    "initial_behavior": 1.00,
-    "initial_error": 1.10,
-    "initial_bm25_queries": 1.20,
-    "query_exact_symbols": 1.40,
-    "query_method_class": 1.25,
-    "query_behavior": 1.00,
-    "query_error": 1.10,
-    "query_bm25_queries": 1.15,
-}
+# 每个工具的进程内调用次数。
+# 用于让 initial_issue_focus 在 BM25 多路召回中的权重随检索轮次指数衰减。
+_retrieval_call_counts: Dict[str, int] = {}
+
+
+def _next_retrieval_step(tool_name: str) -> int:
+    """
+    返回当前工具调用轮次，并递增计数。
+
+    step 从 0 开始：
+      - 第一次 search_hybrid 使用 step=0，issue_focus 权重最高；
+      - 后续 search_hybrid 逐步增大 step，issue_focus 权重指数衰减。
+    """
+    step = _retrieval_call_counts.get(tool_name, 0)
+    _retrieval_call_counts[tool_name] = step + 1
+    return step
 
 
 def _get_cache_dir() -> str:
@@ -60,6 +61,7 @@ def clear_retrieval_cache() -> None:
     """
     n = len(_cache)
     _cache.clear()
+    _retrieval_call_counts.clear()
     logger.info("已清空 retrieval_tools 进程内缓存：%d 项", n)
 
 
@@ -229,7 +231,7 @@ def _load_hybrid_retriever():
     return retriever
 
 
-def _build_bm25_bundle_for_query(query: str):
+def _build_bm25_bundle_for_query(query: str, retrieval_step: int = 0):
     """
     在 retrieval_tools 层读取 issue_focus，并构造 BM25 多路查询。
 
@@ -253,6 +255,7 @@ def _build_bm25_bundle_for_query(query: str):
                 include_query_focus=True,
                 update_query_focus=True,
                 max_queries=12,
+                retrieval_step=retrieval_step,
             )
         except Exception as e:
             logger.warning(
@@ -264,6 +267,7 @@ def _build_bm25_bundle_for_query(query: str):
                 include_query_focus=True,
                 update_query_focus=False,
                 max_queries=12,
+                retrieval_step=retrieval_step,
             )
     except Exception as e:
         logger.warning("issue_focus 不可用，BM25 将仅使用当前 query: %s", e)
@@ -272,6 +276,7 @@ def _build_bm25_bundle_for_query(query: str):
             current_query = query
             queries = [query] if query and query.strip() else []
             query_groups = {"current_query": queries}
+            group_weights = {"current_query": 1.20}
 
             def to_list(self):
                 return self.queries
@@ -465,16 +470,18 @@ def search_hybrid(query: str, top_k: int = 5) -> str:
     """
     try:
         retriever = _load_cached("hybrid_retriever", _load_hybrid_retriever)
-        bm25_bundle = _build_bm25_bundle_for_query(query)
+        retrieval_step = _next_retrieval_step("search_hybrid")
+        bm25_bundle = _build_bm25_bundle_for_query(query, retrieval_step=retrieval_step)
         bm25_queries = bm25_bundle.to_list()
         bm25_query_groups = getattr(bm25_bundle, "query_groups", {}) or {}
+        bm25_group_weights = getattr(bm25_bundle, "group_weights", {}) or {}
 
         response = retriever.search(
             query,
             top_k=top_k,
             bm25_queries=bm25_queries,
             bm25_query_groups=bm25_query_groups,
-            bm25_group_weights=BM25_GROUP_WEIGHTS,
+            bm25_group_weights=bm25_group_weights,
             structural_seed_k=3,
         )
 
@@ -491,6 +498,7 @@ def search_hybrid(query: str, top_k: int = 5) -> str:
             f"检索范围: {response.total_nodes} 个节点  耗时: {response.elapsed_ms:.1f}ms",
             "说明: semantic 负责语义候选，BM25(issue_focus+query) 负责词法召回，结构检索负责围绕高置信 seed 扩展关系节点",
             f"BM25查询组: {_format_bm25_group_summary(bm25_bundle)}",
+            f"BM25 issue_focus 衰减步数: {retrieval_step}",
             "=" * 60,
         ]
 
