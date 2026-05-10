@@ -4,10 +4,11 @@ convergence_guard.py — RetrievalAgent 的步数提醒与收敛控制
 
 职责：
   - 多 tool call 硬拦截
-  - 每 N 步生成 progress notice
-  - 30 步后阻止 broad search
-  - 45 步后只允许 edit / focused test / small range read / git diff
-  - 找到直接错误位置后，最多再允许 5 次 inspection/search
+  - 25 步后阻止 broad search
+  - 35 步后只允许 edit / focused test / small range read / git diff / submit
+  - 45 步后进入终局模式，只允许 edit / focused test / git diff / submit
+  - 找到直接错误位置后，最多再允许 3 次 inspection/search
+  - 源码修改成功后，提醒尽快 git diff -> focused test -> submit
   - 记录收敛相关状态，供 trajectory serialize 使用
 
 注意：
@@ -39,7 +40,8 @@ class ConvergenceGuard:
     is_git_diff_command:
         RetrievalAgent._is_git_diff_command，用于判断有效 visible working-tree diff。
     step_notice_interval:
-        每多少步追加一次 progress notice。
+        每多少步检查一次 progress notice。
+        注意：25 步前不会输出 notice；默认用于 45 步后的终局重复提醒。
     """
 
     def __init__(
@@ -47,7 +49,7 @@ class ConvergenceGuard:
         *,
         make_output: MakeOutputFn,
         is_git_diff_command: IsGitDiffCommandFn,
-        step_notice_interval: int = 10,
+        step_notice_interval: int = 5,
     ):
         self._make_output = make_output
         self._is_git_diff_command = is_git_diff_command
@@ -159,46 +161,69 @@ class ConvergenceGuard:
         """
         每完成一轮 assistant tool action，交互步数 +1。
 
-        当步数达到 10、20、30... 时，返回 progress notice。
+        不在 10 步、20 步提醒。
+        只在关键收敛阶段提醒：
+          - 25 步：禁止 broad search
+          - 35 步：strict convergence
+          - 45 步及之后：终局模式
         """
         self.interaction_step_count += 1
 
         if self.step_notice_interval <= 0:
             return ""
 
-        if self.interaction_step_count % self.step_notice_interval != 0:
+        step = self.interaction_step_count
+
+        # 25 步前不提醒；也不在 10/20 步提醒。
+        if step < 25:
             return ""
 
-        return self.make_step_notice_message(self.interaction_step_count)
+        # 25、35 是关键单点提醒。
+        if step in {25, 35}:
+            return self.make_step_notice_message(step)
+
+        # 45 步后进入终局模式，每 step_notice_interval 步重复强提醒。
+        if step >= 45 and step % self.step_notice_interval == 0:
+            return self.make_step_notice_message(step)
+
+        return ""
 
     @staticmethod
     def make_step_notice_message(step_count: int) -> str:
         if step_count >= 45:
             stage = (
-                "You are at or beyond step 45. Convergence mode is now strict. "
-                "Only these actions are allowed: make a source edit, run a focused reproduction/test, "
-                "inspect one small line range, or inspect git diff. Do not use retrieval tools, broad grep, "
-                "broad search, or full-file reads."
+                "【终局模式】已经到达 45 步或更多，距离 step limit 非常近。\n"
+                "现在只能做收敛动作：最小源码编辑、focused test/reproduction、git diff、最终提交。\n"
+                "不要再 retrieval，不要再 broad grep，不要再读整文件，不要再继续查同一概念。\n"
+                "如果已经有源码修改，必须按这个顺序推进：git diff -> 最多一次 focused test -> submit。\n"
+                "如果 focused test 因环境、依赖、收集错误或 policy 被阻断，不要继续调环境，应该回到 git diff 并提交当前最小修复。"
             )
-        elif step_count >= 30:
+        elif step_count >= 35:
             stage = (
-                "You are at or beyond step 30. Broad search is now blocked. "
-                "Do not use search_hybrid/search_bm25/search_semantic/search_structural/deepen_file, broad grep, "                "or full-file reads. Choose a concrete convergence action."
+                "【严格收敛模式】已经到达 35 步。\n"
+                "现在必须进入 修改 -> git diff -> focused test -> submit 的闭环。\n"
+                "只允许：最小源码编辑、focused test/reproduction、小范围读取、git diff、最终提交。\n"
+                "不要再扩大搜索范围，不要再读无关文件，不要再重复验证同一事实。\n"
+                "如果已经做过源码修改，下一步优先 git diff。"
             )
         else:
             stage = (
-                "Reassess progress now. If you have already found the likely source file, "
-                "relevant tests, or the function that directly implements the reported behavior, "
-                "do not keep broadening the search."
+                "【强制收敛提醒】已经到达 25 步。\n"
+                "从现在开始禁止 broad search。\n"
+                "不要再调用 search_hybrid/search_bm25/search_semantic/search_structural/deepen_file。\n"
+                "不要再 broad grep，不要再整文件读取。\n"
+                "如果已经找到直接报错位置、相关测试或核心函数，必须开始准备最小修改。"
             )
 
         return (
-            "\n\n[progress notice]\n"
-            f"已经交互了 {step_count} 步。\n"
-            f"You have interacted for {step_count} steps.\n\n"
+            "\n\n[progress notice / 收敛提醒]\n"
+            f"已经交互了 {step_count} 步。\n\n"
             f"{stage}\n\n"
-            "Recommended next actions: run a focused reproduction, inspect one small missing code range, "
-            "make a minimal source edit, run git diff, or submit if the final non-empty diff has already been inspected.\n"
+            "硬性执行顺序：\n"
+            "1. 没有修改：小范围确认后立刻做最小源码编辑。\n"
+            "2. 已有源码修改：立刻查看 `git diff`。\n"
+            "3. diff 合理：最多运行一次 focused test/reproduction。\n"
+            "4. focused test 通过、无法运行、或被 policy/environment 阻断：不要继续消耗步数，提交当前最小修复。\n"
         )
 
     @staticmethod
@@ -231,9 +256,10 @@ class ConvergenceGuard:
         根据当前 step 和定位状态，阻止低收益探索。
 
         规则：
-          - 30 步后禁止 broad search。
-          - 45 步后只允许 edit / focused test / small range read / git diff。
-          - 找到直接错误行后最多再查 5 步；之后必须 edit 或加测试。
+          - 25 步后禁止 broad search。
+          - 35 步后只允许 edit / focused test / small range read / git diff / submit。
+          - 45 步后只允许 edit / focused test / git diff / submit。
+          - 找到直接错误行后最多再查 3 步；之后必须 edit / test / diff / submit。
         """
         step = self.interaction_step_count + 1
 
@@ -244,16 +270,23 @@ class ConvergenceGuard:
                 "",
             )
 
-        if step >= 30 and self.is_broad_search_action(action):
+        if step >= 35 and not self.is_allowed_after_step_35(action):
             return self._make_output(
-                self.make_step_30_broad_search_block_message(action),
+                self.make_step_35_block_message(action),
+                1,
+                "",
+            )
+
+        if step >= 25 and self.is_broad_search_action(action):
+            return self._make_output(
+                self.make_step_25_broad_search_block_message(action),
                 1,
                 "",
             )
 
         if self.direct_error_location_found:
-            if self.is_inspection_or_search_action(action) and not self.is_source_edit_or_test_or_diff_action(action):
-                if self.post_error_location_inspection_count >= 5:
+            if self.is_inspection_or_search_action(action) and not self.is_source_edit_or_test_or_diff_or_submit_action(action):
+                if self.post_error_location_inspection_count >= 3:
                     return self._make_output(
                         self.make_direct_error_convergence_block_message(action),
                         1,
@@ -342,13 +375,14 @@ class ConvergenceGuard:
             re.search(r"(^|\n)\.?/?tests?/", text)
         ) or bool(re.search(r"(^|\n)\.?/?django/[A-Za-z0-9_./-]+\.py:\d+:", text))
 
-    def is_allowed_after_step_45(self, action: dict) -> bool:
+    def is_allowed_after_step_35(self, action: dict) -> bool:
         """
-        45 步后只允许：
+        35 步后只允许：
           - source edit
           - focused reproduction/test
           - small range read
           - git diff
+          - submit
         """
         if "tool_name" in action:
             return False
@@ -362,11 +396,36 @@ class ConvergenceGuard:
             or self.is_focused_test_or_reproduction_command(command)
             or self.is_small_range_read_command(command)
             or self._is_git_diff_command(command)
+            or self.is_submit_command(command)
+        )
+
+    def is_allowed_after_step_45(self, action: dict) -> bool:
+        """
+        45 步后进入终局模式，只允许：
+          - source edit
+          - focused reproduction/test
+          - git diff
+          - submit
+
+        注意：45 步后不再允许 small range read，避免继续探索导致 limit exceed。
+        """
+        if "tool_name" in action:
+            return False
+
+        command = (action.get("command") or "").strip()
+        if not command:
+            return False
+
+        return (
+            self.is_likely_source_edit_command(command)
+            or self.is_focused_test_or_reproduction_command(command)
+            or self._is_git_diff_command(command)
+            or self.is_submit_command(command)
         )
 
     def is_broad_search_action(self, action: dict) -> bool:
         """
-        判断是否是 30 步后应阻止的 broad search。
+        判断是否是 25 步后应阻止的 broad search。
         """
         if "tool_name" in action:
             tool_name = action.get("tool_name")
@@ -409,6 +468,9 @@ class ConvergenceGuard:
         )
 
     def is_source_edit_or_test_or_diff_action(self, action: dict) -> bool:
+        return self.is_source_edit_or_test_or_diff_or_submit_action(action)
+
+    def is_source_edit_or_test_or_diff_or_submit_action(self, action: dict) -> bool:
         if "tool_name" in action:
             return False
 
@@ -420,12 +482,27 @@ class ConvergenceGuard:
             self.is_likely_source_edit_command(command)
             or self.is_focused_test_or_reproduction_command(command)
             or self._is_git_diff_command(command)
+            or self.is_submit_command(command)
+        )
+
+    @staticmethod
+    def is_submit_command(command: str) -> bool:
+        """
+        判断是否是最终提交命令。
+
+        兼容常见 mini-swe-agent/SWE-agent 提交方式。
+        """
+        c = command.strip()
+        return (
+            "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in c
+            or "submit_final_output" in c.lower()
+            or "submit" == c.lower()
         )
 
     @staticmethod
     def is_broad_grep_command(command: str) -> bool:
         """
-        broad grep: 搜索范围太大，30 步后禁止。
+        broad grep: 搜索范围太大，25 步后禁止。
         """
         c = command.strip()
 
@@ -453,7 +530,7 @@ class ConvergenceGuard:
     @staticmethod
     def is_broad_read_command(command: str) -> bool:
         """
-        full-file read: 读整文件，30 步后禁止。
+        full-file read: 读整文件，25 步后禁止。
         """
         c = command.strip()
 
@@ -554,37 +631,90 @@ class ConvergenceGuard:
         ):
             self.source_edit_count += 1
 
+            # 直接把强提醒追加到成功编辑的 observation 中。
+            # 这样不必等到 25/35/45 步 notice，模型会在修改成功后立刻看到下一步要求。
+            result["output"] = (
+                f"{result.get('output', '')}\n\n"
+                "[source edit notice / 修改后强提醒]\n"
+                "源码已经成功修改。不要继续搜索，不要继续读无关文件。\n"
+                "下一步优先执行：`cd \"$REPO_ROOT\" && git diff`。\n"
+                "确认 diff 合理后，最多运行一次 focused test/reproduction。\n"
+                "如果测试通过、无法运行、或被环境/policy 阻断，应提交当前最小修复，避免 step limit exceed。\n"
+            )
+
+    @staticmethod
+    def make_step_25_broad_search_block_message(action: dict) -> str:
+        return (
+            "[policy error / 强制收敛] 25 步以后禁止继续宽泛搜索。\n\n"
+            "你已经消耗了足够多的定位步数。现在继续 search / deepen / broad grep / 整文件读取，"
+            "很可能导致 step limit exceed。\n\n"
+            "下一步必须更具体，只能选择：\n"
+            "1. 读取一个很小的缺失代码范围；\n"
+            "2. 运行一个 focused reproduction/test；\n"
+            "3. 做最小源码修改；\n"
+            "4. 查看 git diff；\n"
+            "5. 如果 diff 已经确认合理，提交最终结果。\n\n"
+            "不要继续搜索同一概念。不要继续扩大范围。\n"
+            "如果已经有源码修改，立刻 git diff -> 最多一次 focused test -> submit。\n\n"
+            f"Blocked action: {action}"
+        )
+
     @staticmethod
     def make_step_30_broad_search_block_message(action: dict) -> str:
+        # 兼容旧调用；实际策略已经提前到 25 步。
+        return ConvergenceGuard.make_step_25_broad_search_block_message(action)
+
+    @staticmethod
+    def make_step_35_block_message(action: dict) -> str:
         return (
-            "[policy error] Broad search is blocked at step 30 or later.\n\n"
-            "You have spent enough steps locating the issue. Do not continue broad search, broad grep, "
-            "repeated retrieval, or full-file reads.\n\n"
-            "Next action must be more concrete: inspect one small missing line range, run a focused reproduction/test, "
-            "make a minimal source edit, or inspect git diff.\n\n"
+            "[policy error / 严格收敛] 35 步以后只允许收敛动作。\n\n"
+            "你已经进入后半程。继续探索会显著增加 limit exceed 风险。\n"
+            "现在必须围绕当前最可能的修复闭环推进：修改 -> git diff -> focused test -> submit。\n\n"
+            "允许动作：\n"
+            "1. 最小源码编辑；\n"
+            "2. focused reproduction 或 focused test；\n"
+            "3. 只读取一个小范围代码片段：`nl -ba file.py | sed -n 'start,endp'`；\n"
+            "4. 查看 visible working-tree diff：`cd \"$REPO_ROOT\" && git diff`；\n"
+            "5. 提交最终结果。\n\n"
+            "禁止动作：\n"
+            "- retrieval 工具；\n"
+            "- broad grep / broad search；\n"
+            "- 整文件读取；\n"
+            "- 继续查同一概念；\n"
+            "- 在已有 diff 后反复验证。\n\n"
+            "如果已经有非空 diff，下一步优先 git diff；如果 diff 已确认，最多一次 focused test 后提交。\n\n"
             f"Blocked action: {action}"
         )
 
     @staticmethod
     def make_step_45_block_message(action: dict) -> str:
         return (
-            "[policy error] At step 45 or later, only convergence actions are allowed.\n\n"
-            "Allowed actions:\n"
-            "1. Make a minimal source edit.\n"
-            "2. Run a focused reproduction or focused test.\n"
-            "3. Inspect one small line range with `nl -ba file.py | sed -n 'start,endp'`.\n"
-            "4. Inspect visible working-tree diff with `cd \"$REPO_ROOT\" && git diff`.\n\n"
-            "Do not call retrieval tools, broad grep, broad search, or full-file reads now.\n\n"
+            "[policy error / 终局模式] 45 步以后不能再浪费任何一步。\n\n"
+            "现在只允许：\n"
+            "1. 最小源码编辑；\n"
+            "2. focused reproduction 或 focused test；\n"
+            "3. git diff；\n"
+            "4. submit。\n\n"
+            "不再允许小范围读取。不要再补充探索。\n"
+            "如果已有非空 diff：请立刻 git diff 确认，然后提交。\n"
+            "除非还没有运行过 focused test，否则不要再新增测试尝试。\n"
+            "如果 focused test 因环境、依赖、收集错误或 policy 失败，不要继续调环境，应该提交当前最小修复。\n\n"
             f"Blocked action: {action}"
         )
 
     @staticmethod
     def make_direct_error_convergence_block_message(action: dict) -> str:
         return (
-            "[policy error] The direct error-emitting location or failing behavior has already been found, "
-            "and 5 additional inspection/search actions have been used.\n\n"
-            "You must now make a minimal source edit or add a focused regression test. "
-            "Do not continue searching the same concept.\n\n"
+            "[policy error / 必须停止探索] 已经找到直接报错位置或失败行为，"
+            "并且又额外进行了 3 次 inspection/search。\n\n"
+            "现在继续查同一概念是在浪费步数，极易导致 limit exceed。\n"
+            "下一步必须执行以下动作之一：\n"
+            "1. 做最小源码修改；\n"
+            "2. 添加 focused regression test；\n"
+            "3. 如果已经修改，查看 git diff；\n"
+            "4. 如果 diff 已确认合理，提交最终结果。\n\n"
+            "不要再 grep、不要再 search、不要再 deepen、不要再读整文件。\n"
+            "如果已经有源码修改，立刻 git diff -> 最多一次 focused test -> submit。\n\n"
             f"Blocked action: {action}"
         )
 
@@ -605,9 +735,11 @@ class ConvergenceGuard:
     @staticmethod
     def guardrail_flags() -> dict:
         return {
-            "step_notice_every_10_turns": True,
+            "step_notice_before_step_25": False,
             "block_multiple_tool_calls": True,
-            "block_broad_search_after_step_30": True,
-            "strict_convergence_after_step_45": True,
-            "force_edit_or_test_after_direct_error_location": True,
+            "block_broad_search_after_step_25": True,
+            "strict_convergence_after_step_35": True,
+            "final_convergence_after_step_45": True,
+            "force_edit_or_test_after_direct_error_location_3_inspections": True,
+            "source_edit_notice_git_diff_test_submit": True,
         }

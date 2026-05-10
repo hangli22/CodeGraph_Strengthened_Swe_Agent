@@ -35,7 +35,7 @@ python mini_swe_agent_integration/run_swebench_batch.py \
 --slice后面为运行的实例编号，20:30表示第20个到第29个
 model有deepseek-v3:671b，deepseek-v4-flash
 
-python -m swebench.harness.run_evaluation   --dataset_name princeton-nlp/SWE-bench_Lite   --split test   --predictions_path ./results/retrieval_zhou_09/preds.json   --max_workers 1   --run_id retrieval_0_11
+python -m swebench.harness.run_evaluation   --dataset_name princeton-nlp/SWE-bench_Lite   --split test   --predictions_path ./preds.json   --max_workers 1   --run_id retrieval_0_11
 
 以上是评测preds的指令，注意路径名字是否正确
 
