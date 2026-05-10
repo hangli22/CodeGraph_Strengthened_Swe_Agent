@@ -1,122 +1,17 @@
 {
-  "mode": "retrieval",
-  "model_name": "openai/deepseek-v3:671b",
-  "total": 5,
+  "mode": "baseline",
+  "model_name": "openai/deepseek-v4-flash",
+  "total": 1,
   "instances": [
     {
       "instance_id": "django__django-11630",
-      "mode": "retrieval",
+      "mode": "baseline",
       "exit_status": "LimitsExceeded",
       "n_steps": 60,
       "cost": 0.0,
-      "elapsed_s": 2282.8,
-      "retrieval_stats": {
-        "search_structural": 0,
-        "search_semantic": 1,
-        "search_hybrid": 1,
-        "deepen_file": 2
-      },
+      "elapsed_s": 1665.6,
+      "retrieval_stats": {},
       "has_patch": false,
-      "env_info": {
-        "environment": "docker",
-        "docker_image": "sweagent-multipy:latest",
-        "docker_repo_path": "/workspace/repo",
-        "repo_root": "/workspace/repo",
-        "python_version": "3.11",
-        "python_exe": "python3.11",
-        "venv_path": "/tmp/sweagent-venv",
-        "build_requires": []
-      }
-    },
-    {
-      "instance_id": "django__django-11742",
-      "mode": "retrieval",
-      "exit_status": "LimitsExceeded",
-      "n_steps": 60,
-      "cost": 0.0,
-      "elapsed_s": 1677.7,
-      "retrieval_stats": {
-        "search_structural": 1,
-        "search_semantic": 0,
-        "search_hybrid": 3,
-        "deepen_file": 2
-      },
-      "has_patch": false,
-      "env_info": {
-        "environment": "docker",
-        "docker_image": "sweagent-multipy:latest",
-        "docker_repo_path": "/workspace/repo",
-        "repo_root": "/workspace/repo",
-        "python_version": "3.11",
-        "python_exe": "python3.11",
-        "venv_path": "/tmp/sweagent-venv",
-        "build_requires": []
-      }
-    },
-    {
-      "instance_id": "django__django-11797",
-      "mode": "retrieval",
-      "exit_status": "LimitsExceeded",
-      "n_steps": 60,
-      "cost": 0.0,
-      "elapsed_s": 1633.0,
-      "retrieval_stats": {
-        "search_structural": 0,
-        "search_semantic": 0,
-        "search_hybrid": 2,
-        "deepen_file": 1
-      },
-      "has_patch": false,
-      "env_info": {
-        "environment": "docker",
-        "docker_image": "sweagent-multipy:latest",
-        "docker_repo_path": "/workspace/repo",
-        "repo_root": "/workspace/repo",
-        "python_version": "3.11",
-        "python_exe": "python3.11",
-        "venv_path": "/tmp/sweagent-venv",
-        "build_requires": []
-      }
-    },
-    {
-      "instance_id": "django__django-11815",
-      "mode": "retrieval",
-      "exit_status": "LimitsExceeded",
-      "n_steps": 60,
-      "cost": 0.0,
-      "elapsed_s": 1340.4,
-      "retrieval_stats": {
-        "search_structural": 0,
-        "search_semantic": 2,
-        "search_hybrid": 1,
-        "deepen_file": 1
-      },
-      "has_patch": false,
-      "env_info": {
-        "environment": "docker",
-        "docker_image": "sweagent-multipy:latest",
-        "docker_repo_path": "/workspace/repo",
-        "repo_root": "/workspace/repo",
-        "python_version": "3.11",
-        "python_exe": "python3.11",
-        "venv_path": "/tmp/sweagent-venv",
-        "build_requires": []
-      }
-    },
-    {
-      "instance_id": "django__django-11848",
-      "mode": "retrieval",
-      "exit_status": "Submitted",
-      "n_steps": 19,
-      "cost": 0.0,
-      "elapsed_s": 1193.3,
-      "retrieval_stats": {
-        "search_structural": 0,
-        "search_semantic": 0,
-        "search_hybrid": 1,
-        "deepen_file": 1
-      },
-      "has_patch": true,
       "env_info": {
         "environment": "docker",
         "docker_image": "sweagent-multipy:latest",

@@ -16,6 +16,45 @@ BM25 适合匹配：
   - 参数名
   - 报错关键词
   - issue 中出现的符号名
+
+
+BM25 模块整体比较合理，但有一个“分组权重失效”风险
+
+IssueFocusStore.build_bm25_query_bundle() 会先构造 groups，然后再：
+
+queries = _dedup_clean(queries)[:max_queries]
+
+但是 query_groups 仍然保留原始所有 group 的 query。
+
+这不一定会报错，因为 BM25Retriever.search_many() 是按实际传入的 queries 遍历，再通过 query_to_groups 找 group。
+
+但问题是：截断后的 queries 可能集中在前几个 group。当前顺序是：
+
+current_query
+initial_exact_symbols
+initial_method_class
+initial_behavior
+initial_error
+initial_bm25_queries
+query_focus...
+
+如果 max_queries=12，有可能 query_focus 的部分被截掉。也就是说，后期 agent 当前 query 的 focus 未必真的进入 BM25。
+
+这和你的设计目标“后期更相信当前 query / query_focus”有点冲突。
+
+**建议：**不要简单全局截断。应该分配 quota，例如：
+
+current_query 必保留；
+query_exact_symbols 必保留；
+query_method_class 保留；
+initial_exact_symbols 保留；
+initial_behavior / initial_bm25_queries 可压缩。
+
+
+
+
+
+
 """
 
 from __future__ import annotations

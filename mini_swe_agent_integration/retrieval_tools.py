@@ -564,9 +564,15 @@ def deepen_file(
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     graph = _load_cached("graph", _load_graph)
-    struct_ret = _load_cached("structural_retriever", _load_structural_retriever)
+
+    # semantic retriever 需要提前加载：
+    # 1. 给 FileDeepener 提供 embedding_backend；
+    # 2. HybridRetriever 内部也会复用同一个 cached semantic retriever。
     sem_ret = _load_cached("semantic_retriever", _load_semantic_retriever)
-    bm25_ret = _load_cached("bm25_retriever", _load_bm25_retriever)
+
+    # 统一融合检索器。它内部复用 cached structural / semantic / BM25。
+    # deepen 后只通过 hybrid_ret.rebuild_after_deepen() 更新三路索引。
+    hybrid_ret = _load_cached("hybrid_retriever", _load_hybrid_retriever)
 
     # 规范化路径
     file_rel = file_path.lstrip("./").replace("\\", "/")
@@ -587,7 +593,6 @@ def deepen_file(
             f"已深化文件: {', '.join(deepened[:5])}..."
         )
 
-    # 关键修改：
     # 如果 agent 没传 issue_query，则从 issue_focus/query_focus 中自动恢复。
     # 否则 FileDeepener.deepen(issue_query="") 不会生成 method_summaries。
     deepen_issue_query = _build_deepen_issue_query(issue_query)
@@ -609,55 +614,27 @@ def deepen_file(
         max_neighbor_files=max_neighbor_files,
     )
 
-    # 更新语义索引：为新节点计算 embedding
-    if result.new_node_ids and sem_ret.backend is not None:
-        new_texts = []
-        for nid in result.new_node_ids:
-            node = graph.get_node(nid)
-            if node:
-                comment = getattr(node, "comment", "") or ""
-                signature = getattr(node, "signature", "") or ""
-                docstring = getattr(node, "docstring", "") or ""
-                code_text = getattr(node, "code_text", "") or ""
+    # 统一更新三路检索索引：
+    # - structural：deepen 新增 PARENT_CHILD/SIBLING/CALLS/OVERRIDES，必须 rebuild；
+    # - semantic：方案 C，更新已有 CLASS/FUNCTION/METHOD + 追加新增 METHOD；
+    # - BM25：已有节点文本变化时 rebuild，只有新增节点时 add_nodes。
+    index_update_ok = True
+    index_update_error = ""
 
-                if comment.strip():
-                    text = comment.strip()
-                elif signature or docstring:
-                    text = node.skeleton_embedding_text()
-                else:
-                    text = code_text[:500].strip()
-                new_texts.append(text or nid)
-            else:
-                new_texts.append(nid)
-
-        try:
-            new_embeddings = sem_ret.backend.embed_batch(new_texts)
-            sem_ret.add_nodes(result.new_node_ids, new_texts, new_embeddings)
-        except Exception as e:
-            logger.warning(
-                "新节点 embedding 失败: %s（检索仍可用，但新节点暂无语义索引）",
-                e,
-            )
-
-    # 更新结构索引：
-    # 当前结构检索是粗粒度关系检索，不依赖旧 feature_matrix。
-    # deepen 后可能新增方法节点和 CALLS 边，因此 rebuild 可刷新结构索引。
-    if hasattr(struct_ret, "rebuild"):
-        struct_ret.rebuild()
-
-    # 更新 BM25 索引：
-    # - 如果 deepen 只是新增节点，可以 add_nodes(result.new_node_ids)。
-    # - 如果 deepen 会修改已有节点文本/comment/method_names/code_text，则必须 rebuild。
-    # 当前 FileDeepener 会补充已有 CLASS/FUNCTION 节点 code_text/signature/docstring，
-    # 因此默认保守 rebuild，保证 BM25 不读旧文本。
     try:
-        bm25_text_changed = bool(getattr(result, "text_changed", True))
-        if bm25_text_changed and hasattr(bm25_ret, "rebuild"):
-            bm25_ret.rebuild()
-        elif result.new_node_ids and hasattr(bm25_ret, "add_nodes"):
-            bm25_ret.add_nodes(result.new_node_ids)
+        hybrid_ret.rebuild_after_deepen(
+            new_node_ids=getattr(result, "new_node_ids", []),
+            updated_node_ids=getattr(result, "updated_node_ids", []),
+            text_changed=bool(getattr(result, "text_changed", True)),
+        )
     except Exception as e:
-        logger.warning("BM25 索引更新失败: %s（检索仍可用，但 BM25 可能未包含深化内容）", e)
+        index_update_ok = False
+        index_update_error = f"{type(e).__name__}: {e}"
+        logger.warning(
+            "Hybrid 检索索引更新失败: %s（检索仍可用，但可能未包含最新深化内容）",
+            e,
+            exc_info=True,
+        )
 
     # 生成压缩版汇总：默认返回 5 个 issue-relevant methods，
     # 每个 method summary 最多 3 条 high-confidence call evidence，最多 3 个 imported/neighbor files，
@@ -669,8 +646,18 @@ def deepen_file(
 
     lines = [
         f"[deepen_file] 文件 {file_rel} 已深化为完整解析",
-        f"统计: 新增方法节点={result.method_count}，新增关系边={result.new_edge_count}，CALLS边={result.call_edge_count}",
+        (
+            f"统计: 新增方法节点={result.method_count}，"
+            f"新增/索引节点={len(getattr(result, 'new_node_ids', []))}，"
+            f"更新/重嵌入节点={len(getattr(result, 'updated_node_ids', []))}，"
+            f"新增关系边={result.new_edge_count}，CALLS边={result.call_edge_count}"
+        ),
     ]
+
+    if index_update_ok:
+        lines.append("索引更新: hybrid semantic/structural/BM25 已刷新")
+    else:
+        lines.append(f"索引更新: 失败，后续检索可能未包含本次深化内容；错误: {index_update_error}")
 
     if deepen_issue_query:
         preview = deepen_issue_query.replace("\n", " ")
@@ -718,7 +705,10 @@ def deepen_file(
                     lines.append(f"      - {call}")
 
         if len(result.method_summaries) > summary_limit:
-            lines.append(f"    ... 另有 {len(result.method_summaries) - summary_limit} 个 issue-relevant method 未显示")
+            lines.append(
+                f"    ... 另有 {len(result.method_summaries) - summary_limit} "
+                f"个 issue-relevant method 未显示"
+            )
     else:
         if deepen_issue_query:
             lines.append("")

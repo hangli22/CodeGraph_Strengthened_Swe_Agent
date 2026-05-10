@@ -168,6 +168,14 @@ class DeepenResult:
 
     file_rel:        str            = ""
     new_node_ids:    List[str]      = field(default_factory=list)
+
+    # 新增：deepen 中已有但文本发生变化的节点。
+    # 典型包括：
+    #   - CLASS：骨架 class 节点被补充完整 code_text
+    #   - FUNCTION：顶层函数被补充完整 code_text/signature/docstring
+    #   - METHOD：如果重复/补充 deepen 已存在 method，也会更新
+    updated_node_ids: List[str]    = field(default_factory=list)
+
     new_edge_count:  int            = 0
     call_edge_count: int            = 0
     method_count:    int            = 0
@@ -176,24 +184,17 @@ class DeepenResult:
 
     # deepen 会更新已有 CLASS/FUNCTION 节点的 code_text/signature/docstring，
     # 也会新增 METHOD 节点。因此默认认为检索文本发生变化。
-    # retrieval_tools 可据此决定 BM25 是 add_nodes 还是 rebuild。
     text_changed:    bool           = True
 
-    # issue 相关 method 摘要：现在是“多数短摘要 + 少数完整 preview”
-    # 注意跟issue_focus相关，还是和当前LLM发出的查询关键词相关
     method_summaries: List[MethodSummary] = field(default_factory=list)
-
-    # 因为相邻类被额外 deepen 的文件：当前实现是相邻文件只扩一层，不继续递归 issue 分析。
-    # 是否增加递归？如果增加，递归终止条件？
     neighbor_deepened_files: List[str] = field(default_factory=list)
-
-    # 局部调用链关系说明：现在更偏向 agent 提示，而不是机械列边。
     relation_summary: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "file_rel": self.file_rel,
             "new_node_ids": self.new_node_ids,
+            "updated_node_ids": self.updated_node_ids,
             "new_edge_count": self.new_edge_count,
             "call_edge_count": self.call_edge_count,
             "method_count": self.method_count,
@@ -397,6 +398,17 @@ def _method_embedding_text(node: CodeNode, parent_class: Optional[CodeNode] = No
     return "\n".join(parts).strip()
 
 
+def _append_unique(items: List[str], value: str) -> None:
+    """向 list 追加唯一值，保持插入顺序。"""
+    if value and value not in items:
+        items.append(value)
+
+
+def _extend_unique(items: List[str], values: Iterable[str]) -> None:
+    """向 list 批量追加唯一值，保持插入顺序。"""
+    for value in values:
+        _append_unique(items, value)
+
 # ---------------------------------------------------------------------------
 # 主类
 # ---------------------------------------------------------------------------
@@ -538,13 +550,13 @@ class FileDeepener:
 
         source_lines = source.splitlines(keepends=True)
 
-        # Step 1+2：更新已有节点 + 创建 METHOD 节点
+        # Step 1+2：更新已有 CLASS 节点 + 创建/更新 METHOD 节点
         self._extract_methods(file_rel, tree, source_lines, result)
 
-        # Step 3：更新已有 FUNCTION 节点的 code_text
-        self._update_function_code(file_rel, tree, source_lines)
+        # Step 3：更新已有 FUNCTION 节点的 code_text/signature/docstring
+        self._update_function_code(file_rel, tree, source_lines, result)
 
-        # Step 4：CALLS 边。新版：调用形式识别 + 轻量解析 + 置信度/证据。
+        # Step 4：CALLS 边
         self._build_calls(file_rel, tree, result)
 
         # Step 5：OVERRIDES 边
@@ -577,6 +589,7 @@ class FileDeepener:
             # 更新 CLASS 节点的 code_text 为完整源码
             full_code = _extract_source(source_lines, node)
             graph.update_node_attr(class_id, code_text=full_code)
+            _append_unique(result.updated_node_ids, class_id)
 
             method_ids: List[str] = []
             for item in node.body:
@@ -598,6 +611,7 @@ class FileDeepener:
                         start_line=item.lineno,
                         end_line=item.end_lineno or item.lineno,
                     )
+                    _append_unique(result.updated_node_ids, method_id)
                     method_ids.append(method_id)
                     continue
 
@@ -614,7 +628,7 @@ class FileDeepener:
                     docstring=docstring,
                 )
                 graph.add_node(method_node)
-                result.new_node_ids.append(method_id)
+                _append_unique(result.new_node_ids, method_id)
                 result.method_count += 1
 
                 # PARENT_CHILD 边：CLASS -> METHOD
@@ -635,15 +649,12 @@ class FileDeepener:
                     graph.add_edge(CodeEdge(src=a, dst=b, relation_type=EdgeType.SIBLING))
                     result.new_edge_count += 1
 
-    # ------------------------------------------------------------------
-    # 更新 FUNCTION 节点的 code_text
-    # ------------------------------------------------------------------
-
     def _update_function_code(
         self,
         file_rel: str,
         tree: ast.Module,
         source_lines: List[str],
+        result: DeepenResult,
     ) -> None:
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -658,6 +669,7 @@ class FileDeepener:
                         start_line=node.lineno,
                         end_line=node.end_lineno or node.lineno,
                     )
+                    _append_unique(result.updated_node_ids, func_id)
 
     # ------------------------------------------------------------------
     # CALLS 边：调用形式识别 + 轻量解析
@@ -1510,10 +1522,19 @@ class FileDeepener:
                     max_neighbor_files=0,
                     _visited_files=visited_files,
                 )
-                if sub_result.method_count or sub_result.new_node_ids:
-                    result.neighbor_deepened_files.append(nf)
+                if sub_result.method_count or sub_result.new_node_ids or sub_result.updated_node_ids:
+                    _append_unique(result.neighbor_deepened_files, nf)
+
+                    # 合并子 deepen 的节点变化，保证外层 retrieval_tools 能统一更新索引。
+                    _extend_unique(result.new_node_ids, sub_result.new_node_ids)
+                    _extend_unique(result.updated_node_ids, sub_result.updated_node_ids)
+
+                    result.method_count += sub_result.method_count
                     result.new_edge_count += sub_result.new_edge_count
                     result.call_edge_count += sub_result.call_edge_count
+
+                    # 子 deepen 的 imported files 也合并，方便输出进一步深化提示。
+                    _extend_unique(result.imported_files, sub_result.imported_files)
 
         # 邻接类文件 deepen 后，CALLS 边可能增加。
         # 这里重新生成 summary，让关系信息包含刚刚扩展出来的边。

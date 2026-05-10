@@ -9,6 +9,71 @@ hybrid_retriever.py — 结构 + 语义 + BM25 融合检索（适配方向三）
 推荐调用方式：
   - retrieval_tools.py 负责读取 issue_focus.json 并组装 bm25_queries / bm25_query_groups
   - HybridRetriever.search(query, bm25_queries=..., bm25_query_groups=...) 只负责融合检索
+
+
+最大问题：HybridRetriever.rebuild_after_deepen() 没有更新 semantic 索引
+
+
+SemanticRetriever.build() 可能重复收集节点
+
+SemanticRetriever.build() 里直接调用 _collect_nodes()，但从你给出的内容看，build 前没有清空：
+
+self._collect_nodes()
+
+而 _collect_nodes() 是 append 到：
+
+self._node_ids
+self._texts
+
+如果 build() 被调用多次，可能会重复加入同一批节点。
+
+这对未来非常危险，因为如果你按我上面建议在 deepen 后重建 semantic，可能导致：
+
+_node_ids 重复；
+embedding matrix 重复；
+nearest neighbor 中重复结果；
+检索分数和 top_k 异常。
+
+**建议：**给 SemanticRetriever 加：
+
+def rebuild(self):
+    self._node_ids = []
+    self._texts = []
+    self._matrix = None
+    self._nn = None
+    self._built = False
+    return self.build()
+
+并且 build() 开头也最好清空一次，避免误用。
+
+
+HybridRetriever.search_by_node() 对骨架节点不友好
+
+search_by_node() 中 semantic/BM25 的 query 文本只用：
+
+node.comment
+else node.code_text[:300]
+
+但是骨架图中 CLASS/FUNCTION 的有效文本很多在：
+
+signature
+docstring
+method_names
+skeleton_embedding_text()
+
+如果 comment 为空，code_text 也可能只是很短的骨架摘要或为空，那么 search_by_node() 的语义/BM25 辅助召回会偏弱。
+
+**建议：**改成：
+
+sem_query = node.comment.strip() or node.skeleton_embedding_text() or node.code_text[:300].strip()
+
+这样和 SemanticRetriever._collect_nodes() 的文本构造逻辑一致。
+
+
+
+
+
+
 """
 
 from __future__ import annotations
@@ -68,29 +133,50 @@ class HybridRetriever:
     def rebuild_after_deepen(
         self,
         new_node_ids: Optional[List[str]] = None,
+        updated_node_ids: Optional[List[str]] = None,
         text_changed: bool = True,
     ) -> "HybridRetriever":
         """
-        deepen 后更新索引。
+        deepen 后更新三路索引。
 
-        参数：
-          new_node_ids:
-              deepen 后新增节点 ID。若只是新增节点，可用 BM25 add_nodes()。
-          text_changed:
-              如果 deepen 会修改已有节点文本、comment、method_names、code_text，
-              必须重建 BM25。默认 True，优先保证正确性。
+        new_node_ids:
+            deepen 新增的 METHOD 节点。
 
-        结构索引始终 rebuild，因为 deepen 通常会新增/修改图关系。
-        语义索引按你原有设计：若 semantic_retriever 支持增量 add_nodes，
-        可在外部调用；否则建议也在对应流程中处理。
+        updated_node_ids:
+            deepen 中已存在但文本发生变化的节点，通常包括：
+            - 当前文件的 CLASS 节点；
+            - 当前文件的顶层 FUNCTION 节点；
+            - 已存在 METHOD 被再次更新时的节点。
+
+        text_changed:
+            是否有节点文本变化。对 BM25 来说，如果已有节点文本变化，
+            最稳妥是 rebuild；如果只是新增节点，可 add_nodes。
         """
+        self._ensure_built()
+
+        new_node_ids = new_node_ids or []
+        updated_node_ids = updated_node_ids or []
+
+        # 1. 结构索引：deepen 会新增 PARENT_CHILD/SIBLING/CALLS/OVERRIDES 等边，必须重建。
         self._structural.rebuild()
 
+        # 2. Semantic：方案 C，更新已有节点 + 追加新节点。
+        if hasattr(self._semantic, "update_after_deepen"):
+            self._semantic.update_after_deepen(
+                new_node_ids=new_node_ids,
+                updated_node_ids=updated_node_ids,
+            )
+        else:
+            # 兼容旧版本；不推荐长期使用。
+            self._semantic.rebuild() if hasattr(self._semantic, "rebuild") else self._semantic.build()
+
+        # 3. BM25：当前 BM25 没有 update_nodes，已有节点变动时仍建议 rebuild。
         if text_changed:
             self._bm25.rebuild()
         elif new_node_ids:
             self._bm25.add_nodes(new_node_ids)
 
+        self._built = True
         return self
 
     def search(
@@ -176,6 +262,50 @@ class HybridRetriever:
             elapsed_ms=(time.perf_counter() - t0) * 1000,
         )
 
+    def _node_query_text(self, node) -> str:
+        """
+        为 search_by_node 构造语义/BM25 查询文本。
+
+        不能只用 comment/code_text，因为骨架图中 CLASS/FUNCTION 的有效信息
+        主要在 signature、docstring、method_names、skeleton_embedding_text。
+        """
+        if node is None:
+            return ""
+
+        parts: List[str] = []
+
+        if getattr(node, "comment", "") and node.comment.strip():
+            parts.append(node.comment.strip())
+
+        try:
+            skel = node.skeleton_embedding_text()
+            if skel and skel.strip():
+                parts.append(skel.strip())
+        except Exception:
+            pass
+
+        if getattr(node, "signature", ""):
+            parts.append(f"signature {node.signature}")
+
+        if getattr(node, "docstring", ""):
+            parts.append(f"docstring {node.docstring}")
+
+        if getattr(node, "method_names", None):
+            methods = ", ".join(str(x) for x in node.method_names if x)
+            if methods:
+                parts.append(f"methods {methods}")
+
+        if getattr(node, "qualified_name", ""):
+            parts.append(node.qualified_name)
+
+        if getattr(node, "file", ""):
+            parts.append(f"file {node.file}")
+
+        if getattr(node, "code_text", ""):
+            parts.append(node.code_text[:800].strip())
+
+        return "\n".join(p for p in parts if p and str(p).strip()).strip()
+
     def search_by_node(
         self,
         node_id: str,
@@ -184,7 +314,7 @@ class HybridRetriever:
     ) -> RetrievalResponse:
         """
         以节点为起点的混合检索。
-        结构侧使用指定查询模式，语义/BM25 侧使用节点注释/代码作为 query。
+        结构侧使用指定查询模式，语义/BM25 侧使用节点的骨架有效文本。
         """
         self._ensure_built()
         t0 = time.perf_counter()
@@ -193,18 +323,12 @@ class HybridRetriever:
         node = self.graph.get_node(node_id)
         query_text = node.qualified_name if node else node_id
 
-        # 结构检索
+        # 1. 结构检索
         struct_resp = self._structural.search(node_id, mode=mode, top_k=candidate_k)
         struct_results = [r for r in struct_resp.results if r.node_id != node_id]
 
-        # 语义/BM25 查询文本
-        sem_query = ""
-        if node:
-            sem_query = (
-                node.comment.strip()
-                if node.comment and node.comment.strip()
-                else (node.code_text[:300].strip() if node.code_text else "")
-            )
+        # 2. 用骨架有效文本构造 semantic/BM25 query
+        sem_query = self._node_query_text(node) if node else ""
 
         sem_resp = (
             self._semantic.search(sem_query, top_k=candidate_k)
@@ -226,6 +350,7 @@ class HybridRetriever:
             bm25_results=bm25_results,
             top_k=top_k,
         )
+
         return RetrievalResponse(
             query=query_text,
             results=merged,

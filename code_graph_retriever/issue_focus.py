@@ -341,11 +341,11 @@ class IssueFocusStore:
         """
         从 initial_issue_focus + current_query + query_focus 构造 BM25 多路查询。
 
-        注意：
-        - 不把所有字段粗暴拼成一个超长 query；
-        - 而是形成多路短 query；
-        - initial_issue_focus 的 group 权重会随 retrieval_step 指数衰减；
-        - current_query / query_focus 不衰减，用于后期更相信 agent 当前线索。
+        改进点：
+        - 不再按插入顺序简单截断；
+        - 根据 group 权重、信息新旧、是否精确符号进行排序；
+        - 优先去掉低权重、时间更早、泛化程度高的 query；
+        - 但保留少量原始 issue query，防止 agent 当前 query 跑偏。
         """
         if current_query and update_query_focus:
             self.update_query_focus(current_query, force=True)
@@ -373,20 +373,18 @@ class IssueFocusStore:
             groups["query_error"] = _make_error_queries(query_focus)
             groups["query_bm25_queries"] = query_focus.bm25_queries
 
-        queries: List[str] = []
-        for _, qs in groups.items():
-            for q in qs:
-                q = q.strip()
-                if q:
-                    queries.append(q)
-
-        queries = _dedup_clean(queries)[:max_queries]
-
         group_weights = build_bm25_group_weights(
             retrieval_step=retrieval_step,
             issue_start_weight=issue_start_weight,
             issue_min_weight=issue_min_weight,
             issue_decay_lambda=issue_decay_lambda,
+        )
+
+        queries = _select_bm25_queries_by_priority(
+            groups=groups,
+            group_weights=group_weights,
+            max_queries=max_queries,
+            min_initial_queries=2,
         )
 
         return BM25QueryBundle(
@@ -738,6 +736,155 @@ def build_bm25_query_bundle_from_cache(
         issue_min_weight=issue_min_weight,
         issue_decay_lambda=issue_decay_lambda,
     )
+
+def _select_bm25_queries_by_priority(
+    groups: Dict[str, List[str]],
+    group_weights: Dict[str, float],
+    max_queries: int = 12,
+    min_initial_queries: int = 2,
+) -> List[str]:
+    """
+    按优先级选择 BM25 queries。
+
+    目标：
+      1. current_query / query_focus 优先；
+      2. exact_symbols / method_class 优先；
+      3. initial_issue 随时间衰减，但至少保留少量；
+      4. 泛化 behavior/raw keyword 更容易被裁掉；
+      5. 不按插入顺序简单截断。
+    """
+    if max_queries <= 0:
+        return []
+
+    items: List[Tuple[float, int, str, str]] = []
+    seen = set()
+    order = 0
+
+    for group, qs in groups.items():
+        for q in qs:
+            q = (q or "").strip()
+            if not q:
+                continue
+
+            norm = q.lower()
+            if norm in seen:
+                continue
+            seen.add(norm)
+
+            score = _bm25_query_priority_score(
+                query=q,
+                group=group,
+                group_weight=group_weights.get(group, 1.0),
+            )
+            items.append((score, order, group, q))
+            order += 1
+
+    if not items:
+        return []
+
+    # 先保留少量 initial issue，防止后期 query_focus 跑偏。
+    initial_items = [
+        item for item in items
+        if item[2].startswith("initial_")
+    ]
+    initial_items.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+
+    selected: List[Tuple[float, int, str, str]] = []
+    selected_norm = set()
+
+    for item in initial_items[:max(0, min_initial_queries)]:
+        q = item[3]
+        selected.append(item)
+        selected_norm.add(q.lower())
+
+    # 剩余所有 query 按优先级竞争。
+    remaining = [
+        item for item in items
+        if item[3].lower() not in selected_norm
+    ]
+    remaining.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+
+    for item in remaining:
+        if len(selected) >= max_queries:
+            break
+        selected.append(item)
+        selected_norm.add(item[3].lower())
+
+    # 最终输出仍按优先级排序，而不是原插入顺序。
+    selected.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+    return [q for _, _, _, q in selected[:max_queries]]
+
+def _bm25_query_priority_score(
+    query: str,
+    group: str,
+    group_weight: float,
+) -> float:
+    """
+    单条 BM25 query 的保留分。
+
+    分数越低，越容易在 max_queries 截断时被丢弃。
+    """
+    q = query.strip()
+    score = float(group_weight)
+
+    # 当前 query / query_focus 更新，优先保留。
+    if group == "current_query":
+        score += 0.40
+    elif group.startswith("query_"):
+        score += 0.25
+    elif group.startswith("initial_"):
+        score += 0.00
+
+    # 精确符号长期有用。
+    if "exact_symbols" in group:
+        score += 0.35
+    if "method_class" in group:
+        score += 0.25
+    if "error" in group:
+        score += 0.15
+
+    # behavior / raw bm25_queries 通常更泛，后期更容易干扰。
+    if "behavior" in group:
+        score -= 0.20
+    if "bm25_queries" in group:
+        score -= 0.10
+
+    # query 本身像代码符号/文件路径，优先保留。
+    if _looks_like_code_or_path_query(q):
+        score += 0.30
+
+    # 过长 query 往往 BM25 效果更差，轻微降权。
+    if len(q.split()) > 12:
+        score -= 0.15
+
+    return score
+
+def _looks_like_code_or_path_query(query: str) -> bool:
+    """
+    判断 query 是否包含较强代码/路径信号。
+    """
+    q = query.strip()
+
+    if not q:
+        return False
+
+    # 文件路径或 Python 文件名
+    if "/" in q or "\\" in q or ".py" in q:
+        return True
+
+    # snake_case / dunder / 私有符号
+    if re.search(r"\b_+[A-Za-z0-9_]+|[a-z]+_[a-zA-Z0-9_]+\b", q):
+        return True
+
+    # CamelCase 类名
+    if re.search(r"\b[A-Z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*\b", q):
+        return True
+
+    # dotted qualified name
+    if re.search(r"\b[a-zA-Z_][a-zA-Z0-9_]*(\.[a-zA-Z_][a-zA-Z0-9_]*)+\b", q):
+        return True
+
+    return False
 
 
 def build_bm25_group_weights(

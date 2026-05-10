@@ -1,5 +1,10 @@
 """
 semantic_retriever.py — 基于注释/骨架 Embedding 的语义检索（支持增量 add_nodes）
+
+SemanticRetriever.add_nodes() 接口不太实用，而且没有去重
+
+
+
 """
 
 from __future__ import annotations
@@ -227,37 +232,292 @@ class SemanticRetriever:
         self._built = False
 
     def build(self) -> "SemanticRetriever":
+        """
+        初次完整构建 semantic 索引。
+
+        注意：
+        build 的语义是“从当前 graph 完整构建索引”，不是增量追加。
+        因此每次 build 前必须清空旧索引，避免重复收集同一批节点。
+        """
         if self.backend is None:
             self.backend = get_default_embedding_backend()
+
+        self._clear_index()
         self._collect_nodes()
+
         if not self._node_ids:
             self._built = True
             return self
+
+        # TFIDF backend 不能稳定做局部增量；完整 build 时重新 fit。
         if isinstance(self.backend, TFIDFEmbeddingBackend):
             self.backend.fit(self._texts)
+
         self._matrix = self.backend.embed_batch(self._texts)
-        self._nn = NearestNeighbors(metric="cosine", algorithm="brute")
-        self._nn.fit(self._matrix)
+        self._refit_nn()
         self._built = True
         return self
+
+    def _clear_index(self) -> None:
+        """清空 semantic 索引。"""
+        self._node_ids = []
+        self._texts = []
+        self._matrix = None
+        self._nn = None
+        self._built = False
+
+
+    def rebuild(self) -> "SemanticRetriever":
+        """
+        完整重建 semantic 索引。
+
+        主要用于：
+        - fallback；
+        - TFIDF backend；
+        - 发现增量更新不可靠时。
+        """
+        self._clear_index()
+        return self.build()
+
+
+    def _refit_nn(self) -> None:
+        """根据当前 embedding matrix 重新 fit NearestNeighbors。"""
+        if self._matrix is None or self._matrix.shape[0] == 0:
+            self._nn = None
+            return
+
+        self._nn = NearestNeighbors(metric="cosine", algorithm="brute")
+        self._nn.fit(self._matrix)
+
+    def _node_to_text(self, node) -> str:
+        """
+        构造 semantic embedding 文本。
+
+        优先级：
+        1. comment：如果有 LLM 注释，通常语义最浓缩；
+        2. skeleton_embedding_text：包含 signature/docstring/method_names；
+        3. code_text：深化后完整源码；
+        4. qualified_name/name/file：兜底。
+        """
+        parts: List[str] = []
+
+        if getattr(node, "comment", "") and node.comment.strip():
+            parts.append(node.comment.strip())
+
+        # skeleton_embedding_text 会利用 signature / docstring / method_names。
+        try:
+            skel = node.skeleton_embedding_text()
+            if skel and skel.strip():
+                parts.append(skel.strip())
+        except Exception:
+            pass
+
+        if getattr(node, "signature", ""):
+            parts.append(f"signature {node.signature}")
+
+        if getattr(node, "docstring", ""):
+            parts.append(f"docstring {node.docstring}")
+
+        if getattr(node, "method_names", None):
+            methods = ", ".join(str(x) for x in node.method_names if x)
+            if methods:
+                parts.append(f"methods {methods}")
+
+        if getattr(node, "code_text", ""):
+            parts.append(node.code_text[:1200].strip())
+
+        if getattr(node, "qualified_name", ""):
+            parts.append(node.qualified_name)
+
+        if getattr(node, "file", ""):
+            parts.append(f"file {node.file}")
+
+        text = "\n".join(p for p in parts if p and str(p).strip()).strip()
+        return text
 
     def add_nodes(
         self,
         new_node_ids: List[str],
-        new_texts:    List[str],
-        new_embeddings: np.ndarray,
+        new_texts: Optional[List[str]] = None,
+        new_embeddings: Optional[np.ndarray] = None,
     ) -> None:
-        """深化后增量添加新节点到索引。"""
-        if len(new_node_ids) == 0:
+        """
+        增量添加新节点到 semantic 索引。
+
+        兼容旧接口：
+        - 如果外部传入 new_texts/new_embeddings，则直接使用；
+        - 如果不传，则自动从 graph 构造文本并调用 embedding backend。
+
+        已存在节点不会重复添加；如需更新已有节点，请使用 update_nodes()。
+        """
+        self._ensure_built()
+
+        if not new_node_ids:
             return
-        self._node_ids.extend(new_node_ids)
-        self._texts.extend(new_texts)
-        if self._matrix is not None and self._matrix.shape[0] > 0:
-            self._matrix = np.vstack([self._matrix, new_embeddings])
+
+        if new_texts is not None and len(new_texts) != len(new_node_ids):
+            raise ValueError("new_texts 与 new_node_ids 长度不一致")
+
+        existing = set(self._node_ids)
+        add_ids: List[str] = []
+        add_texts: List[str] = []
+
+        for i, nid in enumerate(new_node_ids):
+            if nid in existing:
+                continue
+
+            node = self.graph.get_node(nid)
+            if node is None:
+                continue
+
+            if node.type not in self.target_types:
+                continue
+
+            text = new_texts[i] if new_texts is not None else self._node_to_text(node)
+            text = (text or "").strip()
+            if not text:
+                continue
+
+            add_ids.append(nid)
+            add_texts.append(text)
+
+        if not add_ids:
+            return
+
+        if self.backend is None:
+            self.backend = get_default_embedding_backend()
+
+        # TFIDF/SVD 不适合局部增量，直接完整重建更安全。
+        if isinstance(self.backend, TFIDFEmbeddingBackend):
+            self.rebuild()
+            return
+
+        if new_embeddings is not None:
+            if new_embeddings.shape[0] != len(new_node_ids):
+                raise ValueError("new_embeddings 行数必须与 new_node_ids 长度一致")
+
+            # 只取真正新增节点对应的 embedding。
+            id_to_emb = {
+                nid: new_embeddings[i]
+                for i, nid in enumerate(new_node_ids)
+            }
+            add_embeddings = np.stack([id_to_emb[nid] for nid in add_ids]).astype(np.float32)
         else:
+            add_embeddings = self.backend.embed_batch(add_texts)
+
+        self._node_ids.extend(add_ids)
+        self._texts.extend(add_texts)
+
+        if self._matrix is not None and self._matrix.shape[0] > 0:
+            self._matrix = np.vstack([self._matrix, add_embeddings])
+        else:
+            self._matrix = add_embeddings
+
+        self._refit_nn()
+        self._built = True
+
+    def update_nodes(self, updated_node_ids: List[str]) -> None:
+        """
+        更新已有节点的 semantic 文本和 embedding。
+
+        用于 deepen 后：
+        - CLASS 节点 code_text 从骨架摘要变成完整 class source；
+        - FUNCTION 节点 code_text/signature/docstring 被更新；
+        - 已有 METHOD 节点被再次 deepen 时也可能更新。
+        """
+        self._ensure_built()
+
+        if not updated_node_ids:
+            return
+
+        if self.backend is None:
+            self.backend = get_default_embedding_backend()
+
+        # TFIDF/SVD 的向量空间依赖整体 corpus，局部更新不可靠，直接 rebuild。
+        if isinstance(self.backend, TFIDFEmbeddingBackend):
+            self.rebuild()
+            return
+
+        id_to_idx = {nid: i for i, nid in enumerate(self._node_ids)}
+
+        real_ids: List[str] = []
+        real_indices: List[int] = []
+        real_texts: List[str] = []
+
+        for nid in updated_node_ids:
+            idx = id_to_idx.get(nid)
+            if idx is None:
+                continue
+
+            node = self.graph.get_node(nid)
+            if node is None:
+                continue
+
+            if node.type not in self.target_types:
+                continue
+
+            text = self._node_to_text(node)
+            text = (text or "").strip()
+            if not text:
+                continue
+
+            real_ids.append(nid)
+            real_indices.append(idx)
+            real_texts.append(text)
+
+        if not real_ids:
+            return
+
+        new_embeddings = self.backend.embed_batch(real_texts)
+
+        if self._matrix is None or self._matrix.shape[0] == 0:
             self._matrix = new_embeddings
-        self._nn = NearestNeighbors(metric="cosine", algorithm="brute")
-        self._nn.fit(self._matrix)
+        else:
+            for row_idx, text, emb in zip(real_indices, real_texts, new_embeddings):
+                self._texts[row_idx] = text
+                self._matrix[row_idx] = emb
+
+        self._refit_nn()
+        self._built = True
+
+
+    def update_after_deepen(
+        self,
+        new_node_ids: Optional[List[str]] = None,
+        updated_node_ids: Optional[List[str]] = None,
+    ) -> None:
+        """
+        deepen 后的 semantic 增量维护入口。
+
+        行为：
+        - updated_node_ids：更新已有 CLASS/FUNCTION/METHOD 的文本和 embedding；
+        - new_node_ids：追加新 METHOD 节点；
+        - 最后重新 fit NearestNeighbors。
+
+        注意：
+        - DashScope/Mock embedding 可以局部更新；
+        - TFIDF backend 不适合局部更新，自动 fallback 到 rebuild。
+        """
+        self._ensure_built()
+
+        new_node_ids = new_node_ids or []
+        updated_node_ids = updated_node_ids or []
+
+        if not new_node_ids and not updated_node_ids:
+            return
+
+        if self.backend is None:
+            self.backend = get_default_embedding_backend()
+
+        if isinstance(self.backend, TFIDFEmbeddingBackend):
+            self.rebuild()
+            return
+
+        if updated_node_ids:
+            self.update_nodes(updated_node_ids)
+
+        if new_node_ids:
+            self.add_nodes(new_node_ids)
 
     def search(self, query: str, top_k: int = 5) -> RetrievalResponse:
         self._ensure_built()
@@ -298,12 +558,11 @@ class SemanticRetriever:
         for node in self.graph.iter_nodes():
             if node.type not in self.target_types:
                 continue
-            # 优先 comment → 骨架 embedding text → code_text 前 500 字
-            text = node.comment.strip() if node.comment.strip() \
-                else node.skeleton_embedding_text() if (node.signature or node.docstring or node.method_names) \
-                else node.code_text[:500].strip()
+
+            text = self._node_to_text(node)
             if not text:
                 continue
+
             self._node_ids.append(node.id)
             self._texts.append(text)
 
