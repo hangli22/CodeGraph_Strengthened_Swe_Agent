@@ -37,7 +37,7 @@ django/db/models/fields/__init__.py -> 17514 chars
 这说明 deepen_file 现在虽然能给 method summary，但对大文件仍然太“豪放”。建议继续压缩：
 
 1. 新增方法列表最多显示 20 个，不要全量展开。
-2. method_summaries 最多显示 6~8 个。
+2. method_summaries 默认显示 5 个。
 3. 大文件默认不展示 code_preview，除非 top similarity 很高。
 4. 对 tests 文件默认只显示匹配到的 test 方法，不显示太多关系提示。
 
@@ -418,8 +418,8 @@ class FileDeepener:
     MAX_DEEPEN_FILES = 20
 
     # method summary：默认返回更多短摘要，只给最相关少数方法保留完整 code_preview。
-    DEFAULT_SUMMARY_METHODS = 12
-    DEFAULT_FULL_PREVIEW_METHODS = 3
+    DEFAULT_SUMMARY_METHODS = 5
+    DEFAULT_FULL_PREVIEW_METHODS = 0
 
     def __init__(
         self,
@@ -1700,7 +1700,7 @@ class FileDeepener:
         self,
         selected_method_ids: List[str],
         scores: Dict[str, float],
-        full_preview_count: int = 3,
+        full_preview_count: int = 0,
     ) -> List[MethodSummary]:
         graph = self.graph
         selected_set = set(selected_method_ids)

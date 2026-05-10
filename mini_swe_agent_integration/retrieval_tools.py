@@ -659,12 +659,17 @@ def deepen_file(
     except Exception as e:
         logger.warning("BM25 索引更新失败: %s（检索仍可用，但 BM25 可能未包含深化内容）", e)
 
-    # 生成汇总
+    # 生成压缩版汇总：默认返回 5 个 issue-relevant methods，
+    # 每个 method summary 最多 3 条 high-confidence call evidence，最多 3 个 imported/neighbor files，
+    # 默认不返回 code_preview，避免大文件触发 Output too long。
     remaining = MAX_DEEPEN_FILES - len(graph.get_deepened_files())
+    summary_limit = 5
+    file_hint_limit = 3
+    per_method_call_evidence_limit = 3
 
     lines = [
         f"[deepen_file] 文件 {file_rel} 已深化为完整解析",
-        "",
+        f"统计: 新增方法节点={result.method_count}，新增关系边={result.new_edge_count}，CALLS边={result.call_edge_count}",
     ]
 
     if deepen_issue_query:
@@ -675,57 +680,45 @@ def deepen_file(
     else:
         lines.append("Issue/query context: <empty>，未生成 issue-related method summary")
 
-    lines += [
-        "",
-        f"新增 {result.method_count} 个方法节点:",
-    ]
-
-    for nid in result.new_node_ids[:10]:
-        node = graph.get_node(nid)
-        if node:
-            sig = getattr(node, "signature", "") or ""
-            docstring = getattr(node, "docstring", "") or ""
-            doc = f" — {docstring}" if docstring else ""
-            lines.append(f"  {node.name}{sig}{doc}")
-
-    if len(result.new_node_ids) > 10:
-        lines.append(f"  ... 共 {len(result.new_node_ids)} 个")
-
-    lines.append("")
-    lines.append(f"新增 {result.new_edge_count} 条关系边 (CALLS: {result.call_edge_count})")
-
     if result.imported_files:
         lines.append("")
-        lines.append("关联文件（可进一步深化）:")
-        for imp_file in result.imported_files[:8]:
+        lines.append(f"关联文件（可进一步深化，最多 {file_hint_limit} 个）:")
+        for imp_file in result.imported_files[:file_hint_limit]:
             lines.append(f"  - {imp_file}")
+        if len(result.imported_files) > file_hint_limit:
+            lines.append(f"  ... 另有 {len(result.imported_files) - file_hint_limit} 个未显示")
 
     if result.neighbor_deepened_files:
         lines.append("")
-        lines.append("因相邻类额外深化的文件:")
-        for nf in result.neighbor_deepened_files[:8]:
+        lines.append(f"因相邻类额外深化的文件（最多 {file_hint_limit} 个）:")
+        for nf in result.neighbor_deepened_files[:file_hint_limit]:
             lines.append(f"  - {nf}")
+        if len(result.neighbor_deepened_files) > file_hint_limit:
+            lines.append(f"  ... 另有 {len(result.neighbor_deepened_files) - file_hint_limit} 个未显示")
 
     if result.method_summaries:
         lines.append("")
-        lines.append("Issue 相关方法摘要:")
-        for i, summary in enumerate(result.method_summaries[:12], 1):
+        lines.append(f"Issue 相关方法摘要（top {min(summary_limit, len(result.method_summaries))}）:")
+        for i, summary in enumerate(result.method_summaries[:summary_limit], 1):
             lines.append(
                 f"[{i}] {summary.qualified_name} "
                 f"({summary.file}:{summary.start_line}-{summary.end_line}) "
                 f"sim={summary.similarity:.3f}"
             )
+            if summary.signature:
+                lines.append(f"    签名: {summary.signature}")
             if summary.short_summary:
                 lines.append(f"    摘要: {summary.short_summary}")
             if summary.why_relevant:
                 lines.append(f"    相关性: {summary.why_relevant}")
+
             if summary.high_confidence_calls:
-                lines.append("    高置信调用:")
-                for call in summary.high_confidence_calls[:3]:
+                lines.append(f"    高置信调用（最多 {per_method_call_evidence_limit} 条）:")
+                for call in summary.high_confidence_calls[:per_method_call_evidence_limit]:
                     lines.append(f"      - {call}")
-            if summary.has_full_preview and summary.code_preview:
-                lines.append("    code_preview:")
-                lines.append(summary.code_preview)
+
+        if len(result.method_summaries) > summary_limit:
+            lines.append(f"    ... 另有 {len(result.method_summaries) - summary_limit} 个 issue-relevant method 未显示")
     else:
         if deepen_issue_query:
             lines.append("")
@@ -734,12 +727,6 @@ def deepen_file(
                 "可能原因：该文件没有 METHOD 节点、embedding_backend 不可用、"
                 "或 method embedding 排序失败。"
             )
-
-    if result.relation_summary:
-        lines.append("")
-        lines.append("局部关系提示:")
-        for item in result.relation_summary[:5]:
-            lines.append(f"  - {item}")
 
     lines.append("")
     lines.append(
