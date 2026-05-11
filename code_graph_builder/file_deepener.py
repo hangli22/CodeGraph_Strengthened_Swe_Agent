@@ -461,8 +461,8 @@ class FileDeepener:
         file_rel: str,
         issue_query: str = "",
         top_methods: int = 5,
-        expand_neighbor_classes: bool = True,
-        max_neighbor_files: int = 3,
+        expand_neighbor_classes: bool = False,
+        max_neighbor_files: int = 0,
         _visited_files: Optional[Set[str]] = None,
     ) -> DeepenResult:
         """
