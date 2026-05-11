@@ -54,7 +54,7 @@ class ConvergenceGuard:
         注意：25 步会输出柔和提醒；30/40 是关键收敛提醒；
         45 步后按 step_notice_interval 重复终局提醒。
         57最后提醒
-        
+
     """
 
     def __init__(
@@ -166,38 +166,38 @@ class ConvergenceGuard:
             "If you need multiple actions, perform them across multiple turns.\n"
         )
 
-        def advance_step_and_maybe_make_notice(self) -> str:
-            """
-            每完成一轮 assistant tool action，交互步数 +1。
+    def advance_step_and_maybe_make_notice(self) -> str:
+        """
+        每完成一轮 assistant tool action，交互步数 +1。
 
-            关键提醒：
-            - 25 步：柔和收敛提醒，不改变允许动作
-            - 30 步：禁止 broad search
-            - 40 步：strict convergence
-            - 45 步及之后：终局模式
-            - 57 步：最终提交提醒；如果已有修改，必须马上 submit
-            """
-            self.interaction_step_count += 1
+        关键提醒：
+        - 25 步：柔和收敛提醒，不改变允许动作
+        - 30 步：禁止 broad search
+        - 40 步：strict convergence
+        - 45 步及之后：终局模式
+        - 57 步：最终提交提醒；如果已有修改，必须马上 submit
+        """
+        self.interaction_step_count += 1
 
-            if self.step_notice_interval <= 0:
-                return ""
-
-            step = self.interaction_step_count
-
-            # 25 步前不提醒。
-            if step < 25:
-                return ""
-
-            # 25、30、40、57 是关键单点提醒。
-            if step in {25, 30, 40, 57}:
-                return self.make_step_notice_message(step)
-
-            # 45 步后进入终局模式，每 step_notice_interval 步重复强提醒。
-            # 避免和 57 步单点最终提醒重复。
-            if step >= 45 and step % self.step_notice_interval == 0:
-                return self.make_step_notice_message(step)
-
+        if self.step_notice_interval <= 0:
             return ""
+
+        step = self.interaction_step_count
+
+        # 25 步前不提醒。
+        if step < 25:
+            return ""
+
+        # 25、30、40、57 是关键单点提醒。
+        if step in {25, 30, 40, 57}:
+            return self.make_step_notice_message(step)
+
+        # 45 步后进入终局模式，每 step_notice_interval 步重复强提醒。
+        # 避免和 57 步单点最终提醒重复。
+        if step >= 45 and step % self.step_notice_interval == 0:
+            return self.make_step_notice_message(step)
+
+        return ""
 
     @staticmethod
     def make_step_notice_message(step_count: int) -> str:

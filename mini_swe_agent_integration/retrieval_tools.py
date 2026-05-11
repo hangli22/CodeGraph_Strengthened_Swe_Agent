@@ -743,12 +743,6 @@ def deepen_file(
 
     lines = [
         f"[deepen_file] 文件 {file_rel} 已深化为完整解析",
-        (
-            # f"统计: 新增方法节点={result.method_count}，"
-            # f"新增/索引节点={len(getattr(result, 'new_node_ids', []))}，"
-            # f"更新/重嵌入节点={len(getattr(result, 'updated_node_ids', []))}，"
-            # f"新增关系边={result.new_edge_count}，CALLS边={result.call_edge_count}"
-        ),
     ]
 
     if index_update_ok:

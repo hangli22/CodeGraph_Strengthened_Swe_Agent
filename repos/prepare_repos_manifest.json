@@ -1,0 +1,93 @@
+{
+  "subset": "lite",
+  "split": "test",
+  "slice": "20:30",
+  "instance_ids_file": "",
+  "repos_dir": "/home/hangli22/CodeAgent/files/repos",
+  "total": 10,
+  "cloned": 10,
+  "reused": 0,
+  "failed": 0,
+  "results": [
+    {
+      "instance_id": "django__django-11630",
+      "repo": "django/django",
+      "base_commit": "65e86948b80262574058a94ccaae3a9b59c3faea",
+      "repo_path": "/home/hangli22/CodeAgent/files/repos/django__django-11630",
+      "status": "cloned",
+      "error": ""
+    },
+    {
+      "instance_id": "django__django-11742",
+      "repo": "django/django",
+      "base_commit": "fee75d2aed4e58ada6567c464cfd22e89dc65f4a",
+      "repo_path": "/home/hangli22/CodeAgent/files/repos/django__django-11742",
+      "status": "cloned",
+      "error": ""
+    },
+    {
+      "instance_id": "django__django-11797",
+      "repo": "django/django",
+      "base_commit": "3346b78a8a872286a245d1e77ef4718fc5e6be1a",
+      "repo_path": "/home/hangli22/CodeAgent/files/repos/django__django-11797",
+      "status": "cloned",
+      "error": ""
+    },
+    {
+      "instance_id": "django__django-11815",
+      "repo": "django/django",
+      "base_commit": "e02f67ef2d03d48128e7a118bf75f0418e24e8ac",
+      "repo_path": "/home/hangli22/CodeAgent/files/repos/django__django-11815",
+      "status": "cloned",
+      "error": ""
+    },
+    {
+      "instance_id": "django__django-11848",
+      "repo": "django/django",
+      "base_commit": "f0adf3b9b7a19cdee05368ff0c0c2d087f011180",
+      "repo_path": "/home/hangli22/CodeAgent/files/repos/django__django-11848",
+      "status": "cloned",
+      "error": ""
+    },
+    {
+      "instance_id": "django__django-11905",
+      "repo": "django/django",
+      "base_commit": "2f72480fbd27896c986c45193e1603e35c0b19a7",
+      "repo_path": "/home/hangli22/CodeAgent/files/repos/django__django-11905",
+      "status": "cloned",
+      "error": ""
+    },
+    {
+      "instance_id": "django__django-11910",
+      "repo": "django/django",
+      "base_commit": "d232fd76a85870daf345fd8f8d617fe7802ae194",
+      "repo_path": "/home/hangli22/CodeAgent/files/repos/django__django-11910",
+      "status": "cloned",
+      "error": ""
+    },
+    {
+      "instance_id": "django__django-11964",
+      "repo": "django/django",
+      "base_commit": "fc2b1cc926e34041953738e58fa6ad3053059b22",
+      "repo_path": "/home/hangli22/CodeAgent/files/repos/django__django-11964",
+      "status": "cloned",
+      "error": ""
+    },
+    {
+      "instance_id": "django__django-11999",
+      "repo": "django/django",
+      "base_commit": "84633905273fc916e3d17883810d9969c03f73c2",
+      "repo_path": "/home/hangli22/CodeAgent/files/repos/django__django-11999",
+      "status": "cloned",
+      "error": ""
+    },
+    {
+      "instance_id": "django__django-12113",
+      "repo": "django/django",
+      "base_commit": "62254c5202e80a68f4fe6572a2be46a3d953de1a",
+      "repo_path": "/home/hangli22/CodeAgent/files/repos/django__django-12113",
+      "status": "cloned",
+      "error": ""
+    }
+  ]
+}

@@ -20,8 +20,8 @@ python mini_swe_agent_integration/run_swebench_batch.py \
   --api_base https://uni-api.cstcloud.cn/v1 \
   --subset lite \
   --split test \
-  --slice 10:30 \
-  --output_dir ./results/retrieval_lihang_11 \
+  --slice 20:30 \
+  --output_dir ./results/retrieval_lihang_11_2 \
   --repos_dir ./repos \
   --cache_dir ./cache \
   --workers 1 \
@@ -97,8 +97,7 @@ print(f"Wrote: {out_path}")
 PY
 
 ## 新评测指令
-BATCH='python mini_swe_agent_integration/run_swebench_batch.py --mode retrieval --model_name openai/deepseek-v4-flash --api_base https://uni-api.cstcloud.cn/v1 --subset lite --split test --slice 10:30 --output_dir ./results/retrieval_lihang_11 --repos_dir ./repos --cache_dir ./cache --workers 1 --step_limit 60 --use_docker --docker_image sweagent-multipy:latest --redo'
-
+BATCH='python mini_swe_agent_integration/run_swebench_batch.py --mode retrieval --model_name openai/deepseek-v4-flash --api_base https://uni-api.cstcloud.cn/v1 --subset lite --split test --slice 20:30 --output_dir ./results/retrieval_lihang_11 --repos_dir ./repos --cache_dir ./cache --workers 1 --step_limit 60 --use_docker --docker_image sweagent-multipy:latest --redo'
 python run_and_analyse.py \
   --batch-cmd "$BATCH" \
   --running-log running.md \
