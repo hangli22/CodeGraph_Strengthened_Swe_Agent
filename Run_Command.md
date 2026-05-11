@@ -1,3 +1,4 @@
+## 原初运行评测
 python mini_swe_agent_integration/run_swebench_batch.py \
   --mode baseline \
   --model_name openai/deepseek-v4-flash \
@@ -244,6 +245,8 @@ export HF_HOME="$HOME/CodeAgent/hf_cache"
 ## export HF_HUB_OFFLINE=1
 EOF
 
+# 服务器ip:服务器公网ip:
+8.136.135.101
 #
 ## 
 ds_api_key:sk-75b3c972d7d741c8af75dda6bd943f5b
@@ -270,7 +273,7 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 PY
 
-## 测试指令：
+## ds 测试指令：(有报错)
 初始29.15元
 
 python mini_swe_agent_integration/run_swebench_batch.py \
@@ -289,4 +292,113 @@ python mini_swe_agent_integration/run_swebench_batch.py \
   --use_docker \
   --docker_image sweagent-multipy:latest \
   --redo
+
+LiteLLM.Info: If you need to debug this error, use `litellm._turn_on_debug()'.
+
+23:26:26 [ERROR] [django__django-12113] Agent 异常: litellm.BadRequestError: OpenAIException - Authentication Fails, Your api key: ****a275 is invalid
+23:26:26 [INFO] [django__django-12113] 完成 | exit=BadRequestError steps=1 cost=$0.0000 elapsed=303s patch=False retrieval={'search_structural': 0, 'search_semantic': 0, 'search_bm25': 0, 'search_hybrid': 0, 'deepen_file': 0} env={'environment': 'docker', 'docker_image': 'sweagent-multipy:latest', 'docker_repo_path': '/workspace/repo', 'repo_root': '/workspace/repo', 'python_version': '3.11', 'python_exe': 'python3.11', 'venv_path': '/tmp/sweagent-venv', 'build_requires': []}
+
+## 操作服务器的指令：
+连接服务器：
+ssh root@8.136.135.101 
+rsync -a --info=progress2 本地目录 root@服务器IP:/root/CodeAgent/files/repos/
+例如：
+rsync -a --info=progress2 ~/save/repos/slice_10_20/ root@8.136.135.101:/root/CodeAgent/files/repos/
+
+
+这些参数可以在运行脚本前用环境变量覆盖：
+服务器 SSH 地址：
+SERVER=root@8.136.135.101
+
+服务器端项目目录：
+REMOTE_PROJECT=/root/CodeAgent/files
+
+本地预构建数据根目录：
+LOCAL_SAVE_ROOT=$HOME/save
+默认要求：
+~/save/repos/slice_20_30/
+~/save/cache/slice_20_30/
+
+本地保存服务器结果的目录：
+LOCAL_RESULT_ROOT=$HOME/save/server_results
+
+服务器结果目录名前缀：
+RUN_PREFIX=retrieval_server
+
+，例如会生成：
+
+results/retrieval_server_20_30/
+MODE=retrieval
+MODEL_NAME=openai/deepseek-v4-flash
+API_BASE=https://uni-api.cstcloud.cn/v1
+SUBSET=lite
+SPLIT=test
+WORKERS=1
+STEP_LIMIT=60
+DOCKER_IMAGE=sweagent-multipy:latest
+
+这些对应 run_swebench_batch.py 的运行参数。脚本内部会把它们拼成 --batch-cmd 传给 run_and_analyse.py；你的 run_and_analyse.py 本身支持通过 --batch-cmd 覆盖默认 batch 命令，并会继续执行 harness 评测与生成 summary。
+
+SSH_OPTS=""
+
+额外 SSH 参数，比如指定密钥：
+SSH_OPTS="-i ~/.ssh/id_ed25519"
+
+## 上传 slice 并让服务器后台运行
+~/server_swe_batch.sh submit 20 30
+作用：
+上传 ~/save/repos/slice_20_30/ 到服务器 repos/
+上传 ~/save/cache/slice_20_30/ 到服务器 cache/
+服务器 nohup 后台运行 slice 20:30
+
+## 查看服务器任务状态
+~/server_swe_batch.sh status 20 30
+会显示 PID、是否还在运行、最后几行日志。
+
+## 实时查看服务器日志
+~/server_swe_batch.sh tail 20 30
+Ctrl + C 不会停止服务器任务。
+
+## 拉回运行结果
+~/server_swe_batch.sh fetch 20 30
+结果会保存到本地：
+~/save/server_results/slice_20_30/
+
+## 清理服务器端数据
+~/server_swe_batch.sh cleanup 20 30
+会清理服务器上的：
+/root/CodeAgent/files/repos/*
+/root/CodeAgent/files/cache/*
+/root/CodeAgent/files/results/retrieval_server_20_30
+需要手动输入 YES 确认。
+
+## 一键运行：上传、启动、等待、拉回
+~/server_swe_batch.sh run 20 30
+它会自动：
+submit -> 等待任务结束 -> fetch
+但不会自动 cleanup，需要你确认结果无误后手动清理。
+
+## 常用示例
+
+### 默认运行：
+~/server_swe_batch.sh submit 20 30
+
+### 使用 SSH key：
+SSH_OPTS="-i ~/.ssh/id_ed25519" ~/server_swe_batch.sh submit 20 30
+
+### 改模型：
+MODEL_NAME="openai/deepseek-v3:671b" ~/server_swe_batch.sh submit 20 30
+
+### 改结果前缀：
+RUN_PREFIX=retrieval_v4_flash_server ~/server_swe_batch.sh submit 20 30
+
+### 跑 baseline：
+MODE=baseline RUN_PREFIX=baseline_server ~/server_swe_batch.sh submit 20 30
+
+
+
+
+
+
+
 
