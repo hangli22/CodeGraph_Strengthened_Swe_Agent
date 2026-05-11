@@ -44,6 +44,10 @@ django/db/models/fields/__init__.py -> 17514 chars
 否则 agent 很容易被大量无关 method 名干扰。
 
 
+这两个参数控制是否对邻居进行深化
+expand_neighbor_classes=False
+max_neighbor_files=0
+
 
 
 """

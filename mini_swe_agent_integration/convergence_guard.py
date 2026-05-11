@@ -8,12 +8,22 @@ convergence_guard.py — RetrievalAgent 的步数提醒与收敛控制
   - 40 步后只允许 edit / focused test / small range read / git diff / submit
   - 45 步后进入终局模式，只允许 edit / focused test / git diff / submit
   - 找到直接错误位置后，最多再允许 5 次 inspection/search
-  - 源码修改成功后，提醒尽快 git diff -> focused test -> submit
+  - 源码修改成功后，提醒完成一个自洽修复批次后 git diff；
+    最多连续 2 次 edit 不 diff；diff 合理后 focused test -> submit
   - 记录收敛相关状态，供 trajectory serialize 使用
 
 注意：
   - 这个模块不执行工具，只判断 action 是否允许。
   - 这个模块不依赖 mini-swe-agent 内部类型，只操作 dict。
+
+现在是每次调用工具都返回提醒吗？
+只有编辑提醒
+
+增加20步柔和收敛提醒
+不要求每次修改后diff，要求完成自洽修改后diff，最多两次edit不diff
+
+
+
 """
 
 from __future__ import annotations
@@ -41,7 +51,10 @@ class ConvergenceGuard:
         RetrievalAgent._is_git_diff_command，用于判断有效 visible working-tree diff。
     step_notice_interval:
         每多少步检查一次 progress notice。
-        注意：30 步前不会输出 notice；默认用于 45 步后的终局重复提醒。
+        注意：25 步会输出柔和提醒；30/40 是关键收敛提醒；
+        45 步后按 step_notice_interval 重复终局提醒。
+        57最后提醒
+        
     """
 
     def __init__(
@@ -153,46 +166,53 @@ class ConvergenceGuard:
             "If you need multiple actions, perform them across multiple turns.\n"
         )
 
-    # ------------------------------------------------------------------
-    # Step notice
-    # ------------------------------------------------------------------
+        def advance_step_and_maybe_make_notice(self) -> str:
+            """
+            每完成一轮 assistant tool action，交互步数 +1。
 
-    def advance_step_and_maybe_make_notice(self) -> str:
-        """
-        每完成一轮 assistant tool action，交互步数 +1。
+            关键提醒：
+            - 25 步：柔和收敛提醒，不改变允许动作
+            - 30 步：禁止 broad search
+            - 40 步：strict convergence
+            - 45 步及之后：终局模式
+            - 57 步：最终提交提醒；如果已有修改，必须马上 submit
+            """
+            self.interaction_step_count += 1
 
-        不在 10 步、20 步提醒。
-        只在关键收敛阶段提醒：
-          - 30 步：禁止 broad search
-          - 40 步：strict convergence
-          - 45 步及之后：终局模式
-        """
-        self.interaction_step_count += 1
+            if self.step_notice_interval <= 0:
+                return ""
 
-        if self.step_notice_interval <= 0:
+            step = self.interaction_step_count
+
+            # 25 步前不提醒。
+            if step < 25:
+                return ""
+
+            # 25、30、40、57 是关键单点提醒。
+            if step in {25, 30, 40, 57}:
+                return self.make_step_notice_message(step)
+
+            # 45 步后进入终局模式，每 step_notice_interval 步重复强提醒。
+            # 避免和 57 步单点最终提醒重复。
+            if step >= 45 and step % self.step_notice_interval == 0:
+                return self.make_step_notice_message(step)
+
             return ""
-
-        step = self.interaction_step_count
-
-        # 30 步前不提醒；也不在 10/20 步提醒。
-        if step < 30:
-            return ""
-
-        # 30、40 是关键单点提醒。
-        if step in {30, 40}:
-            return self.make_step_notice_message(step)
-
-        # 45 步后进入终局模式，每 step_notice_interval 步重复强提醒。
-        if step >= 45 and step % self.step_notice_interval == 0:
-            return self.make_step_notice_message(step)
-
-        return ""
 
     @staticmethod
     def make_step_notice_message(step_count: int) -> str:
-        if step_count >= 45:
+        if step_count >= 57:
             stage = (
-                "【终局模式】已经到达 45 步或更多，距离 step limit 非常近。\n"
+                "【最终提交提醒】已经到达 57 步，距离 60 步上限极近。\n"
+                "如果已经有任何源码修改，必须马上提交最终结果。\n"
+                "不要再搜索，不要再读取代码，不要再运行新的测试，不要再扩大修改范围。\n"
+                "如果已有 diff 且没有明显语法错误，应立即 submit。\n"
+                "如果刚才 focused test 通过、无法运行、或被 policy/environment 阻断，也应立即 submit。\n"
+                "只有在完全没有源码修改时，才允许做一次最小源码编辑；编辑后不要再验证，直接提交。"
+            )
+        elif step_count >= 45:
+            stage = (
+                "【终局模式】已经到达 45 步或更多，不能再浪费任何一步。。\n"
                 "现在只能做收敛动作：最小源码编辑、focused test/reproduction、git diff、最终提交。\n"
                 "不要再 retrieval，不要再 broad grep，不要再读整文件，不要再继续查同一概念。\n"
                 "如果已经有源码修改，必须按这个顺序推进：git diff -> 最多一次 focused test -> submit。\n"
@@ -206,7 +226,7 @@ class ConvergenceGuard:
                 "不要再扩大搜索范围，不要再读无关文件，不要再重复验证同一事实。\n"
                 "如果已经做过源码修改，下一步优先 git diff。"
             )
-        else:
+        elif step_count >= 30:
             stage = (
                 "【强制收敛提醒】已经到达 30 步。\n"
                 "从现在开始禁止 broad search。\n"
@@ -214,16 +234,43 @@ class ConvergenceGuard:
                 "不要再 broad grep，不要再整文件读取。\n"
                 "如果已经找到直接报错位置、相关测试或核心函数，必须开始准备最小修改。"
             )
+        else:
+            stage = (
+                "【柔和收敛提醒】已经到达 25 步。\n"
+                "请开始收敛到最可能的修复路径。\n"
+                "如果已经有候选文件、候选函数或相关测试，不要继续扩大搜索范围。\n"
+                "优先选择：小范围读取关键代码、运行 focused reproduction/test、或准备最小源码修改。\n"
+                "仍允许必要的检索，但不要重复搜索同一概念。"
+            )
+
+        if step_count >= 57:
+            next_steps = (
+                "最终执行顺序：\n"
+                "1. 已有源码修改：立即 submit，不要再验证。\n"
+                "2. 已有 diff 但测试失败或被阻断：提交当前最小修复。\n"
+                "3. 完全没有源码修改：只允许一次最小编辑，然后立即 submit。\n"
+            )
+        elif step_count >= 30:
+            next_steps = (
+                "硬性执行顺序：\n"
+                "1. 没有修改：小范围确认后立刻做最小源码编辑。\n"
+                "2. 已有源码修改：完成一个自洽修复批次后查看 `git diff`。\n"
+                "3. diff 合理：最多运行一次 focused test/reproduction。\n"
+                "4. focused test 通过、无法运行、或被 policy/environment 阻断：不要继续消耗步数，提交当前最小修复。\n"
+            )
+        else:
+            next_steps = (
+                "建议执行顺序：\n"
+                "1. 若仍不确定修复点：只做一次最有价值的小范围确认。\n"
+                "2. 若已有候选修复点：构造 focused reproduction/test 或直接做最小源码修改。\n"
+                "3. 避免继续 broad search、整文件读取、重复 grep 同一概念。\n"
+            )
 
         return (
             "\n\n[progress notice / 收敛提醒]\n"
             f"已经交互了 {step_count} 步。\n\n"
             f"{stage}\n\n"
-            "硬性执行顺序：\n"
-            "1. 没有修改：小范围确认后立刻做最小源码编辑。\n"
-            "2. 已有源码修改：立刻查看 `git diff`。\n"
-            "3. diff 合理：最多运行一次 focused test/reproduction。\n"
-            "4. focused test 通过、无法运行、或被 policy/environment 阻断：不要继续消耗步数，提交当前最小修复。\n"
+            f"{next_steps}"
         )
 
     @staticmethod
@@ -635,15 +682,19 @@ class ConvergenceGuard:
         ):
             self.source_edit_count += 1
 
-            # 直接把强提醒追加到成功编辑的 observation 中。
-            # 这样不必等到 30/40/45 步 notice，模型会在修改成功后立刻看到下一步要求。
+            # 源码修改成功后追加提醒。
+            # 注意：这里不再强制“每次修改后立刻 git diff”，
+            # 而是提醒模型在完成一个自洽修复批次后 git diff。
             result["output"] = (
                 f"{result.get('output', '')}\n\n"
-                "[source edit notice / 修改后强提醒]\n"
+                "[source edit notice / 修改后提醒]\n"
                 "源码已经成功修改。不要继续搜索，不要继续读无关文件。\n"
-                "下一步优先执行：`cd \"$REPO_ROOT\" && git diff`。\n"
-                "确认 diff 合理后，最多运行一次 focused test/reproduction。\n"
-                "如果测试通过、无法运行、或被环境/policy 阻断，应提交当前最小修复，避免 step limit exceed。\n"
+                "如果本次修改已经完成一个自洽修复批次，下一步查看："
+                "`cd \"$REPO_ROOT\" && git diff`。\n"
+                "如果只是修复刚才 diff 暴露出的明显小错误，允许最多再做 1 次小编辑，然后必须 git diff。\n"
+                "不要连续扩大修改范围；不要在已有 diff 后继续探索无关文件。\n"
+                "diff 合理后，最多运行一次 focused test/reproduction。\n"
+                "如果测试通过、无法运行、或被 policy/environment 阻断，应提交当前最小修复，避免 step limit exceed。\n"
             )
 
     @staticmethod
@@ -744,11 +795,12 @@ class ConvergenceGuard:
     @staticmethod
     def guardrail_flags() -> dict:
         return {
-            "step_notice_before_step_30": False,
+            "soft_step_notice_at_step_20": True,
+            "step_notice_before_step_30": True,
             "block_multiple_tool_calls": True,
             "block_broad_search_after_step_30": True,
             "strict_convergence_after_step_40": True,
             "final_convergence_after_step_45": True,
             "force_edit_or_test_after_direct_error_location_5_inspections": True,
-            "source_edit_notice_git_diff_test_submit": True,
+            "source_edit_notice_batch_git_diff_test_submit": True,
         }

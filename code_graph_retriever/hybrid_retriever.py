@@ -71,6 +71,7 @@ sem_query = node.comment.strip() or node.skeleton_embedding_text() or node.code_
 
 
 
+hybrid_retrieval返回内容过多（一万多个字符），导致发散搜索
 
 
 

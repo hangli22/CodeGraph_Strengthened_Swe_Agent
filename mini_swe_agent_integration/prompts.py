@@ -1,6 +1,9 @@
 """Prompt templates for run_swebench_batch.py.
 
 This module intentionally contains only prompt constants.
+考虑要不要修改每次git diff，是否在这里修改
+
+
 """
 
 _BASELINE_SYSTEM_TEMPLATE = (

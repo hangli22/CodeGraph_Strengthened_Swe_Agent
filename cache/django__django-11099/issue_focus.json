@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "instance_id": "django__django-11099",
+  "updated_at": 1778438313.019414,
+  "initial_issue_focus": {
+    "source_type": "initial_issue",
+    "source_text": "UsernameValidator allows trailing newline in usernames\nDescription\n\t\nASCIIUsernameValidator and UnicodeUsernameValidator use the regex \nr'^[\\w.@+-]+$'\nThe intent is to only allow alphanumeric characters as well as ., @, +, and -. However, a little known quirk of Python regexes is that $ will also match a trailing newline. Therefore, the user name validators will accept usernames which end with a newline. You can avoid this behavior by instead using \\A and \\Z to terminate regexes. For example, the validator regex could be changed to\nr'\\A[\\w.@+-]+\\Z'\nin order to reject usernames that end with a newline.\nI am not sure how to officially post a patch, but the required change is trivial - using the regex above in the two validators in contrib.auth.validators.",
+    "exact_symbols": [
+      "UsernameValidator",
+      "ASCIIUsernameValidator",
+      "UnicodeUsernameValidator",
+      "r'^[\\w.@+-]+$'",
+      "r'\\A[\\w.@+-]+\\Z'"
+    ],
+    "file_hints": [
+      "contrib/auth/validators.py"
+    ],
+    "class_hints": [
+      "ASCIIUsernameValidator",
+      "UnicodeUsernameValidator"
+    ],
+    "function_hints": [],
+    "method_hints": [],
+    "parameter_hints": [],
+    "behavior_terms": [
+      "trailing newline",
+      "regex terminates at newline",
+      "ASCII username validation",
+      "Unicode username validation"
+    ],
+    "error_terms": [
+      "trailing newline",
+      "accepts newline"
+    ],
+    "bm25_queries": [
+      "ASCIIUsernameValidator regex newline",
+      "UnicodeUsernameValidator \\A \\Z",
+      "username validator trailing newline"
+    ],
+    "raw_keywords": [
+      "username",
+      "validator",
+      "regex",
+      "newline",
+      "$",
+      "\\A",
+      "\\Z",
+      "contrib.auth"
+    ],
+    "raw_llm_response": "{\n  \"exact_symbols\": [\"UsernameValidator\", \"ASCIIUsernameValidator\", \"UnicodeUsernameValidator\", \"r'^[\\\\w.@+-]+$'\", \"r'\\\\A[\\\\w.@+-]+\\\\Z'\"],\n  \"file_hints\": [\"contrib/auth/validators.py\"],\n  \"class_hints\": [\"ASCIIUsernameValidator\", \"UnicodeUsernameValidator\"],\n  \"function_hints\": [],\n  \"method_hints\": [],\n  \"parameter_hints\": [],\n  \"behavior_terms\": [\"trailing newline\", \"regex terminates at newline\", \"ASCII username validation\", \"Unicode username validation\"],\n  \"error_terms\": [\"trailing newline\", \"accepts newline\"],\n  \"bm25_queries\": [\n    \"ASCIIUsernameValidator regex newline\",\n    \"UnicodeUsernameValidator \\\\A \\\\Z\",\n    \"username validator trailing newline\"\n  ],\n  \"raw_keywords\": [\"username\", \"validator\", \"regex\", \"newline\", \"$\", \"\\\\A\", \"\\\\Z\", \"contrib.auth\"]\n}",
+    "extractor": "llm",
+    "created_at": 1778437796.406314
+  },
+  "query_focus": {
+    "source_type": "query",
+    "source_text": "UsernameValidator ASCIIUsernameValidator UnicodeUsernameValidator regex trailing newline",
+    "exact_symbols": [
+      "UsernameValidator",
+      "ASCIIUsernameValidator",
+      "UnicodeUsernameValidator"
+    ],
+    "file_hints": [],
+    "class_hints": [
+      "UsernameValidator",
+      "ASCIIUsernameValidator",
+      "UnicodeUsernameValidator"
+    ],
+    "function_hints": [],
+    "method_hints": [],
+    "parameter_hints": [],
+    "behavior_terms": [
+      "regex trailing newline",
+      "ASCII username validator",
+      "Unicode username validator"
+    ],
+    "error_terms": [],
+    "bm25_queries": [
+      "UsernameValidator regex",
+      "ASCIIUsernameValidator trailing newline",
+      "UnicodeUsernameValidator validation"
+    ],
+    "raw_keywords": [
+      "trailing newline",
+      "regex"
+    ],
+    "raw_llm_response": "```json\n{\n  \"exact_symbols\": [\"UsernameValidator\", \"ASCIIUsernameValidator\", \"UnicodeUsernameValidator\"],\n  \"file_hints\": [],\n  \"class_hints\": [\"UsernameValidator\", \"ASCIIUsernameValidator\", \"UnicodeUsernameValidator\"],\n  \"function_hints\": [],\n  \"method_hints\": [],\n  \"parameter_hints\": [],\n  \"behavior_terms\": [\"regex trailing newline\", \"ASCII username validator\", \"Unicode username validator\"],\n  \"error_terms\": [],\n  \"bm25_queries\": [\"UsernameValidator regex\", \"ASCIIUsernameValidator trailing newline\", \"UnicodeUsernameValidator validation\"],\n  \"raw_keywords\": [\"trailing newline\", \"regex\"]\n}\n```",
+    "extractor": "llm",
+    "created_at": 1778438313.0192826
+  }
+}

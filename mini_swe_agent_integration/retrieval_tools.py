@@ -744,10 +744,10 @@ def deepen_file(
     lines = [
         f"[deepen_file] 文件 {file_rel} 已深化为完整解析",
         (
-            f"统计: 新增方法节点={result.method_count}，"
-            f"新增/索引节点={len(getattr(result, 'new_node_ids', []))}，"
-            f"更新/重嵌入节点={len(getattr(result, 'updated_node_ids', []))}，"
-            f"新增关系边={result.new_edge_count}，CALLS边={result.call_edge_count}"
+            # f"统计: 新增方法节点={result.method_count}，"
+            # f"新增/索引节点={len(getattr(result, 'new_node_ids', []))}，"
+            # f"更新/重嵌入节点={len(getattr(result, 'updated_node_ids', []))}，"
+            # f"新增关系边={result.new_edge_count}，CALLS边={result.call_edge_count}"
         ),
     ]
 
@@ -766,7 +766,7 @@ def deepen_file(
 
     if result.imported_files:
         lines.append("")
-        lines.append(f"关联文件（可进一步深化，最多 {file_hint_limit} 个）:")
+        # lines.append(f"关联文件（可进一步深化，最多 {file_hint_limit} 个）:")
         for imp_file in result.imported_files[:file_hint_limit]:
             lines.append(f"  - {imp_file}")
         if len(result.imported_files) > file_hint_limit:

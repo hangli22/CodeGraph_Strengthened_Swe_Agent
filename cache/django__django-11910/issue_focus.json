@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "instance_id": "django__django-11910",
+  "updated_at": 1778456027.0424051,
+  "initial_issue_focus": {
+    "source_type": "initial_issue",
+    "source_text": "ForeignKey's to_field parameter gets the old field's name when renaming a PrimaryKey.\nDescription\n\t\nHaving these two models \nclass ModelA(models.Model):\n\tfield_wrong = models.CharField('field1', max_length=50, primary_key=True) # I'm a Primary key.\nclass ModelB(models.Model):\n\tfield_fk = models.ForeignKey(ModelA, blank=True, null=True, on_delete=models.CASCADE) \n... migrations applyed ...\nthe ModelA.field_wrong field has been renamed ... and Django recognizes the \"renaming\"\n# Primary key renamed\nclass ModelA(models.Model):\n\tfield_fixed = models.CharField('field1', max_length=50, primary_key=True) # I'm a Primary key.\nAttempts to to_field parameter. \nThe to_field points to the old_name (field_typo) and not to the new one (\"field_fixed\")\nclass Migration(migrations.Migration):\n\tdependencies = [\n\t\t('app1', '0001_initial'),\n\t]\n\toperations = [\n\t\tmigrations.RenameField(\n\t\t\tmodel_name='modela',\n\t\t\told_name='field_wrong',\n\t\t\tnew_name='field_fixed',\n\t\t),\n\t\tmigrations.AlterField(\n\t\t\tmodel_name='modelb',\n\t\t\tname='modela',\n\t\t\tfield=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, to='app1.ModelB', to_field='field_wrong'),\n\t\t),\n\t]",
+    "exact_symbols": [
+      "ForeignKey",
+      "to_field",
+      "RenameField",
+      "AlterField",
+      "ModelA",
+      "ModelB",
+      "primary_key"
+    ],
+    "file_hints": [],
+    "class_hints": [
+      "ForeignKey",
+      "Migration"
+    ],
+    "function_hints": [],
+    "method_hints": [],
+    "parameter_hints": [
+      "to_field",
+      "old_name",
+      "new_name",
+      "model_name",
+      "name"
+    ],
+    "behavior_terms": [
+      "renaming primary key",
+      "ForeignKey to_field old name after rename"
+    ],
+    "error_terms": [],
+    "bm25_queries": [
+      "ForeignKey to_field rename",
+      "RenameField to_field old name",
+      "ForeignKey to_field primary key rename"
+    ],
+    "raw_keywords": [
+      "rename",
+      "primary key",
+      "to_field",
+      "old name"
+    ],
+    "raw_llm_response": "{\n  \"exact_symbols\": [\"ForeignKey\", \"to_field\", \"RenameField\", \"AlterField\", \"ModelA\", \"ModelB\", \"primary_key\"],\n  \"file_hints\": [],\n  \"class_hints\": [\"ForeignKey\", \"Migration\"],\n  \"function_hints\": [],\n  \"method_hints\": [],\n  \"parameter_hints\": [\"to_field\", \"old_name\", \"new_name\", \"model_name\", \"name\"],\n  \"behavior_terms\": [\"renaming primary key\", \"ForeignKey to_field old name after rename\"],\n  \"error_terms\": [],\n  \"bm25_queries\": [\"ForeignKey to_field rename\", \"RenameField to_field old name\", \"ForeignKey to_field primary key rename\"],\n  \"raw_keywords\": [\"rename\", \"primary key\", \"to_field\", \"old name\"]\n}",
+    "extractor": "llm",
+    "created_at": 1778455410.5703647
+  },
+  "query_focus": {
+    "source_type": "query",
+    "source_text": "to_fields ForeignKey ForeignObject from_fields related.py",
+    "exact_symbols": [
+      "to_fields",
+      "ForeignKey",
+      "ForeignObject",
+      "from_fields"
+    ],
+    "file_hints": [
+      "related.py"
+    ],
+    "class_hints": [
+      "ForeignKey",
+      "ForeignObject"
+    ],
+    "function_hints": [],
+    "method_hints": [],
+    "parameter_hints": [
+      "to_fields",
+      "from_fields"
+    ],
+    "behavior_terms": [],
+    "error_terms": [],
+    "bm25_queries": [
+      "ForeignKey to_fields",
+      "ForeignObject from_fields",
+      "related.py ForeignKey"
+    ],
+    "raw_keywords": [
+      "to_fields",
+      "from_fields",
+      "related.py"
+    ],
+    "raw_llm_response": "{\n  \"exact_symbols\": [\"to_fields\", \"ForeignKey\", \"ForeignObject\", \"from_fields\"],\n  \"file_hints\": [\"related.py\"],\n  \"class_hints\": [\"ForeignKey\", \"ForeignObject\"],\n  \"function_hints\": [],\n  \"method_hints\": [],\n  \"parameter_hints\": [\"to_fields\", \"from_fields\"],\n  \"behavior_terms\": [],\n  \"error_terms\": [],\n  \"bm25_queries\": [\"ForeignKey to_fields\", \"ForeignObject from_fields\", \"related.py ForeignKey\"],\n  \"raw_keywords\": [\"to_fields\", \"from_fields\", \"related.py\"]\n}",
+    "extractor": "llm",
+    "created_at": 1778456027.0422015
+  }
+}

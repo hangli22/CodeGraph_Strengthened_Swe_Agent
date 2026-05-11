@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "instance_id": "django__django-11905",
+  "updated_at": 1778454906.7580318,
+  "initial_issue_focus": {
+    "source_type": "initial_issue",
+    "source_text": "Prevent using __isnull lookup with non-boolean value.\nDescription\n\t \n\t\t(last modified by Mariusz Felisiak)\n\t \n__isnull should not allow for non-boolean values. Using truthy/falsey doesn't promote INNER JOIN to an OUTER JOIN but works fine for a simple queries. Using non-boolean values is ​undocumented and untested. IMO we should raise an error for non-boolean values to avoid confusion and for consistency.",
+    "exact_symbols": [
+      "Description",
+      "__isnull",
+      "Prevent",
+      "Mariusz",
+      "Felisiak",
+      "Using",
+      "INNER",
+      "JOIN",
+      "OUTER",
+      "IMO"
+    ],
+    "file_hints": [],
+    "class_hints": [
+      "Prevent",
+      "Description",
+      "Mariusz",
+      "Felisiak",
+      "Using",
+      "INNER",
+      "JOIN",
+      "OUTER",
+      "IMO"
+    ],
+    "function_hints": [],
+    "method_hints": [],
+    "parameter_hints": [
+      "__isnull"
+    ],
+    "behavior_terms": [
+      "prevent",
+      "__isnull",
+      "lookup",
+      "non",
+      "boolean",
+      "value",
+      "description",
+      "last"
+    ],
+    "error_terms": [],
+    "bm25_queries": [
+      "Description __isnull Prevent Mariusz Felisiak Using INNER JOIN",
+      "Prevent Description Mariusz Felisiak Using INNER JOIN OUTER",
+      "prevent __isnull lookup non boolean value description last modified mariusz"
+    ],
+    "raw_keywords": [
+      "prevent",
+      "__isnull",
+      "lookup",
+      "non",
+      "boolean",
+      "value",
+      "description",
+      "last",
+      "modified",
+      "mariusz",
+      "felisiak",
+      "allow",
+      "values",
+      "truthy",
+      "falsey",
+      "doesn",
+      "promote",
+      "inner",
+      "join",
+      "outer",
+      "but",
+      "works",
+      "fine",
+      "simple",
+      "queries",
+      "undocumented",
+      "untested",
+      "imo",
+      "we",
+      "raise"
+    ],
+    "raw_llm_response": "",
+    "extractor": "rules_fallback",
+    "created_at": 1778453691.0473275
+  },
+  "query_focus": {
+    "source_type": "query",
+    "source_text": "__isnull lookup non-boolean validation",
+    "exact_symbols": [
+      "__isnull"
+    ],
+    "file_hints": [],
+    "class_hints": [],
+    "function_hints": [],
+    "method_hints": [],
+    "parameter_hints": [],
+    "behavior_terms": [
+      "non-boolean validation"
+    ],
+    "error_terms": [
+      "non-boolean"
+    ],
+    "bm25_queries": [
+      "__isnull non-boolean",
+      "__isnull validation",
+      "isnull lookup boolean"
+    ],
+    "raw_keywords": [
+      "isnull",
+      "lookup",
+      "validation"
+    ],
+    "raw_llm_response": "```json\n{\n  \"exact_symbols\": [\"__isnull\"],\n  \"file_hints\": [],\n  \"class_hints\": [],\n  \"function_hints\": [],\n  \"method_hints\": [],\n  \"parameter_hints\": [],\n  \"behavior_terms\": [\"non-boolean validation\"],\n  \"error_terms\": [\"non-boolean\"],\n  \"bm25_queries\": [\n    \"__isnull non-boolean\",\n    \"__isnull validation\",\n    \"isnull lookup boolean\"\n  ],\n  \"raw_keywords\": [\"isnull\", \"lookup\", \"validation\"]\n}\n```",
+    "extractor": "llm",
+    "created_at": 1778454906.7578604
+  }
+}

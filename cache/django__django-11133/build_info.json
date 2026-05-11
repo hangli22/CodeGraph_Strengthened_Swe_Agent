@@ -1,0 +1,24 @@
+{
+  "status": "built",
+  "build_mode": "skeleton",
+  "instance_id": "django__django-11133",
+  "repo_path": "./repos/django__django-11133",
+  "cache_dir": "./cache/django__django-11133",
+  "graph_stats": {
+    "total_nodes": 10147,
+    "total_edges": 20177,
+    "skeleton_files": 2545,
+    "deepened_files": 0,
+    "nodes_MODULE": 2545,
+    "nodes_FUNCTION": 1479,
+    "nodes_CLASS": 6123,
+    "edges_IMPORTS": 6992,
+    "edges_CONTAINS": 7602,
+    "edges_INHERITS": 5583
+  },
+  "n_semantic": 7602,
+  "embed_dim": 1024,
+  "embed_backend": "DashScopeEmbeddingBackend",
+  "total_elapsed_s": 498.67,
+  "built_at": "2026-05-11 02:47:16"
+}

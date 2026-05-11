@@ -889,6 +889,24 @@ issue 给了完整场景，应至少搜索 migration rename field / foreign key 
 diff 非空不等于有效修复；要判断是否改变了 issue 的错误链路。
 对 rename/migration 类问题，必须查看 RenameField、ProjectState、ModelState、MigrationAutodetector 或相关测试。
 这次属于典型的：局部相关节点命中 → 未沿生命周期扩展 → 等价修改 → 过早提交。
+### 案例三十（11620）：
+这个 issue 要求：
+path converter 的 to_python() raise Http404 时，DEBUG=True 应该得到 technical response。
+模型的修复是：
+except Http404:
+    return None
+这个会把 converter 中的 Http404 当成“不匹配 URL pattern”，最终可能变成 Resolver404，然后 technical 404 response 处理的是 resolver 404，而不是原始 converter 里的 Http404。
+这可能能让 DEBUG 页面出现 technical 404，但也可能丢失原始 Http404 的 message / traceback 信息。
+从 issue 描述看，用户抱怨的是：
+raise Http404 时没有 technical response，而是普通 server error
+更符合语义的方案可能有两种：
+A. 在 URL resolving/request handling 层让 Http404 正常进入 exception handling。
+B. 在 resolver 中把 Http404 转成 Resolver404，确保 404 技术页能显示 tried/path。
+模型选择的是 B 的变体：直接 return None，让上层继续 resolver 失败。
+这未必完全错误，但它把 Http404 和 ValueError 一样处理，语义上有点可疑，因为 Django 文档通常说 converter.to_python() 应该 raise ValueError 表示 no match；Http404 是更明确的 404。
+所以这次还有一个研究层面的启示：
+----------------------agent 需要区分“让测试过”和“保持异常语义”。--------------------------------
+不过由于最后没提交，评测没有机会验证。
 
 ## 完成或正在完成的优化改进：
 时间问题仍未解决，可以考虑开始过滤文件，或者经过简单检索之后排除一些文件

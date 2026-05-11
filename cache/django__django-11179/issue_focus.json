@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "instance_id": "django__django-11179",
+  "updated_at": 1778439599.8018873,
+  "initial_issue_focus": {
+    "source_type": "initial_issue",
+    "source_text": "delete() on instances of models without any dependencies doesn't clear PKs.\nDescription\n\t\nDeleting any model with no dependencies not updates the PK on the model. It should be set to None after .delete() call.\nSee Django.db.models.deletion:276-281. Should update the model line 280.",
+    "exact_symbols": [
+      "delete",
+      "PK"
+    ],
+    "file_hints": [
+      "django/db/models/deletion.py"
+    ],
+    "class_hints": [],
+    "function_hints": [],
+    "method_hints": [
+      "delete"
+    ],
+    "parameter_hints": [],
+    "behavior_terms": [
+      "clear PK",
+      "set PK to None",
+      "model without dependencies"
+    ],
+    "error_terms": [],
+    "bm25_queries": [
+      "delete set PK None",
+      "model without dependencies delete PK",
+      "clear primary key after delete"
+    ],
+    "raw_keywords": [
+      "primary key",
+      "delete",
+      "dependencies"
+    ],
+    "raw_llm_response": "{\n  \"exact_symbols\": [\"delete\", \"PK\"],\n  \"file_hints\": [\"django/db/models/deletion.py\"],\n  \"class_hints\": [],\n  \"function_hints\": [],\n  \"method_hints\": [\"delete\"],\n  \"parameter_hints\": [],\n  \"behavior_terms\": [\"clear PK\", \"set PK to None\", \"model without dependencies\"],\n  \"error_terms\": [],\n  \"bm25_queries\": [\n    \"delete set PK None\",\n    \"model without dependencies delete PK\",\n    \"clear primary key after delete\"\n  ],\n  \"raw_keywords\": [\"primary key\", \"delete\", \"dependencies\"]\n}",
+    "extractor": "llm",
+    "created_at": 1778439020.8014
+  },
+  "query_focus": {
+    "source_type": "query",
+    "source_text": "def delete django.db.models.base Model delete",
+    "exact_symbols": [
+      "delete",
+      "django.db.models.base",
+      "Model"
+    ],
+    "file_hints": [
+      "django/db/models/base.py"
+    ],
+    "class_hints": [
+      "Model"
+    ],
+    "function_hints": [],
+    "method_hints": [
+      "delete"
+    ],
+    "parameter_hints": [],
+    "behavior_terms": [
+      "model delete"
+    ],
+    "error_terms": [],
+    "bm25_queries": [
+      "Model delete",
+      "django.db.models.base delete",
+      "Model delete method"
+    ],
+    "raw_keywords": [
+      "delete",
+      "Model"
+    ],
+    "raw_llm_response": "```json\n{\n  \"exact_symbols\": [\"delete\", \"django.db.models.base\", \"Model\"],\n  \"file_hints\": [\"django/db/models/base.py\"],\n  \"class_hints\": [\"Model\"],\n  \"function_hints\": [],\n  \"method_hints\": [\"delete\"],\n  \"parameter_hints\": [],\n  \"behavior_terms\": [\"model delete\"],\n  \"error_terms\": [],\n  \"bm25_queries\": [\n    \"Model delete\",\n    \"django.db.models.base delete\",\n    \"Model delete method\"\n  ],\n  \"raw_keywords\": [\"delete\", \"Model\"]\n}\n```",
+    "extractor": "llm",
+    "created_at": 1778439599.8017535
+  }
+}

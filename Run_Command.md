@@ -20,8 +20,8 @@ python mini_swe_agent_integration/run_swebench_batch.py \
   --api_base https://uni-api.cstcloud.cn/v1 \
   --subset lite \
   --split test \
-  --slice 20:21 \
-  --output_dir ./results/retrieval_zhou_09 \
+  --slice 10:30 \
+  --output_dir ./results/retrieval_lihang_11 \
   --repos_dir ./repos \
   --cache_dir ./cache \
   --workers 1 \
@@ -40,12 +40,12 @@ python - <<'PY'
 import json
 from pathlib import Path
 
-iid = "django__django-11630"
-traj = Path(f"./results/retrieval_zhou_09/{iid}/{iid}.traj.json")
+iid = "django__django-11910"
+traj = Path(f"./results/retrieval_lihang_11/{iid}/{iid}.traj.json")
 data = json.loads(traj.read_text(encoding="utf-8"))
 out_path = traj.parent / f"message_300_600_{iid}.md"
-CONTENT_LIMIT = 300
-EXTRA_LIMIT = 600
+CONTENT_LIMIT = 800
+EXTRA_LIMIT = 2000
 def cut(x, limit):
     s = str(x)
     if len(s) > limit:
@@ -96,8 +96,16 @@ out_path.write_text("\n".join(lines), encoding="utf-8")
 print(f"Wrote: {out_path}")
 PY
 
+## 新评测指令
+BATCH='python mini_swe_agent_integration/run_swebench_batch.py --mode retrieval --model_name openai/deepseek-v4-flash --api_base https://uni-api.cstcloud.cn/v1 --subset lite --split test --slice 10:30 --output_dir ./results/retrieval_lihang_11 --repos_dir ./repos --cache_dir ./cache --workers 1 --step_limit 60 --use_docker --docker_image sweagent-multipy:latest --redo'
+
+python run_and_analyse.py \
+  --batch-cmd "$BATCH" \
+  --running-log running.md \
+  --analyse-log annlyse_result.md
+
 ## 评测指令
-python -m swebench.harness.run_evaluation   --dataset_name princeton-nlp/SWE-bench_Lite   --split test   --predictions_path ./results/retrieval_zhou_09/preds.json   --max_workers 1   --run_id retrieval_0_11
+python -m swebench.harness.run_evaluation   --dataset_name princeton-nlp/SWE-bench_Lite   --split test   --predictions_path ./results/retrieval_lihang_11/preds.json   --max_workers 1   --run_id retrieval_0_11
 
 以上是评测preds的指令，注意路径名字是否正确
 
@@ -130,10 +138,67 @@ mkdir -p "$dst"
 shopt -s dotglob nullglob
 mv "$src"/* "$dst"/
 
-### 连文件夹一起移动
-src="/home/hangli22/CodeAgent/files/cache/django__django-11630"
-dst="/mnt/c/Users/hl-pc/Desktop/毕设/CodeAgent/仓库与构建存储_10个slice一组/特别保留：slice --20"
+### 将slice --20:21中的文件移动到cache
+dst="/home/hangli22/CodeAgent/files/cache/django__django-11630"
+src="/mnt/c/Users/hl-pc/Desktop/毕设/CodeAgent/仓库与构建存储_10个slice一组/特别保留：slice --20/cache"
+mkdir -p "$dst"
+shopt -s dotglob nullglob
+mv "$src"/* "$dst"/
+
+
+### 文件夹从wsl移动到windows
+src="/home/hangli22/CodeAgent/files/repos"
+dst="/mnt/c/Users/hl-pc/Desktop/毕设/CodeAgent/仓库与构建存储_10个slice一组/repos/slice--10_20"
 mkdir -p "$dst"
 mv "$src" "$dst"/
 
-## 
+### 将文件夹从windows移动到wsl
+dst="/home/hangli22/CodeAgent/files/cache/django__django-11630"
+src="/mnt/c/Users/hl-pc/Desktop/毕设/CodeAgent/仓库与构建存储_10个slice一组/特别保留：slice --20"
+mkdir -p "$dst"
+mv "$src" "$dst"/
+
+### 预先准备repos
+python mini_swe_agent_integration/prepare_repos.py \
+  --subset lite \
+  --split test \
+  --slice 50:60 \
+  --repos_dir ./repos \
+  --workers 1
+
+### 移动repos
+注意是repos还是cache
+cd ~/save/repos
+cd ~/save/cache
+cd ~/CodeAgent/files
+
+cd ~/save/repos/slice_10_20
+cd ~/save/cache/slice_10_20
+
+将repos下复制到~/save/repos/slice_{num1}_{num2}，而非移动
+rsync -a --info=progress2 /home/hangli22/CodeAgent/files/repos/ ~/save/repos/slice_50_60/
+rsync -a --info=progress2 /home/hangli22/CodeAgent/files/cache/ ~/save/cache/slice_10_20/
+
+反之，将~/save/repos/slice_{num1}_{num2}下复制到repos，而非移动
+rsync -a --info=progress2 ~/save/repos/slice_20_30/ /home/hangli22/CodeAgent/files/repos/
+rsync -a --info=progress2 ~/save/cache/slice_20_30/ /home/hangli22/CodeAgent/files/cache/
+
+不要忘了：
+rm -rf repos
+
+将cache文件夹中的前10条复制到~/save/cache/slice_{num1}_{num2}:
+
+src="/home/hangli22/CodeAgent/files/cache"
+dst="$HOME/save/cache/slice_10_20"
+mkdir -p "$dst"
+find "$src" -mindepth 1 -maxdepth 1 -type d | sort | head -10 | while read -r dir; do
+  rsync -a --info=progress2 "$dir" "$dst/"
+done
+
+将后10条：
+src="/home/hangli22/CodeAgent/files/cache"
+dst="$HOME/save/cache/slice_20_30"
+mkdir -p "$dst"
+find "$src" -mindepth 1 -maxdepth 1 -type d | sort | tail -10 | while read -r dir; do
+  rsync -a --info=progress2 "$dir" "$dst/"
+done
