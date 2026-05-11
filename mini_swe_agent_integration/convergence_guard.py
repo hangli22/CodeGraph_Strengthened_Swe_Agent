@@ -51,7 +51,7 @@ class ConvergenceGuard:
         RetrievalAgent._is_git_diff_command，用于判断有效 visible working-tree diff。
     step_notice_interval:
         每多少步检查一次 progress notice。
-        注意：25 步会输出柔和提醒；30/40 是关键收敛提醒；
+        注意：25 步不会输出柔和提醒；30/40 是关键收敛提醒；
         45 步后按 step_notice_interval 重复终局提醒。
         57最后提醒
 
@@ -171,11 +171,13 @@ class ConvergenceGuard:
         每完成一轮 assistant tool action，交互步数 +1。
 
         关键提醒：
-        - 25 步：柔和收敛提醒，不改变允许动作
         - 30 步：禁止 broad search
         - 40 步：strict convergence
         - 45 步及之后：终局模式
         - 57 步：最终提交提醒；如果已有修改，必须马上 submit
+
+        注意：
+        - 30 步前不再输出柔和提醒。
         """
         self.interaction_step_count += 1
 
@@ -184,12 +186,12 @@ class ConvergenceGuard:
 
         step = self.interaction_step_count
 
-        # 25 步前不提醒。
-        if step < 25:
+        # 30 步前不提醒。
+        if step < 30:
             return ""
 
-        # 25、30、40、57 是关键单点提醒。
-        if step in {25, 30, 40, 57}:
+        # 30、40、57 是关键单点提醒。
+        if step in {30, 40, 57}:
             return self.make_step_notice_message(step)
 
         # 45 步后进入终局模式，每 step_notice_interval 步重复强提醒。
@@ -795,8 +797,8 @@ class ConvergenceGuard:
     @staticmethod
     def guardrail_flags() -> dict:
         return {
-            "soft_step_notice_at_step_20": True,
-            "step_notice_before_step_30": True,
+            "soft_step_notice_at_step_20": False,
+            "step_notice_before_step_30": False,
             "block_multiple_tool_calls": True,
             "block_broad_search_after_step_30": True,
             "strict_convergence_after_step_40": True,

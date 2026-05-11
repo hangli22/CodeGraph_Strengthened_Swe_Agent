@@ -191,7 +191,7 @@ rsync -a --info=progress2 /home/hangli22/CodeAgent/files/repos/ ~/save/repos/sli
 rsync -a --info=progress2 /home/hangli22/CodeAgent/files/cache/ ~/save/cache/slice_10_20/
 
 反之，将~/save/repos/slice_{num1}_{num2}下复制到repos/cache，而非移动
-rsync -a --info=progress2 ~/save/repos/slice_20_30/ /home/hangli22/CodeAgent/files/repos/
+rsync -a --info=progress2 ~/save/repos/slice_10_20/ /home/hangli22/CodeAgent/files/repos/
 rsync -a --info=progress2 ~/save/cache/slice_20_30/ /home/hangli22/CodeAgent/files/cache/
 
 不要忘了：
@@ -344,6 +344,9 @@ SSH_OPTS=""
 额外 SSH 参数，比如指定密钥：
 SSH_OPTS="-i ~/.ssh/id_ed25519"
 
+
+chmod +x ~/server_swe_batch.sh
+之后再运行:
 ## 上传 slice 并让服务器后台运行
 ~/server_swe_batch.sh submit 20 30
 作用：
