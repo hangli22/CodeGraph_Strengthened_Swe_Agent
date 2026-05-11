@@ -1,7 +1,7 @@
 {
   "version": 1,
   "instance_id": "django__django-11797",
-  "updated_at": 1778446131.4378343,
+  "updated_at": 1778484002.3089561,
   "initial_issue_focus": {
     "source_type": "initial_issue",
     "source_text": "Filtering on query result overrides GROUP BY of internal query\nDescription\n\t\nfrom django.contrib.auth import models\na = models.User.objects.filter(email__isnull=True).values('email').annotate(m=Max('id')).values('m')\nprint(a.query) # good\n# SELECT MAX(\"auth_user\".\"id\") AS \"m\" FROM \"auth_user\" WHERE \"auth_user\".\"email\" IS NULL GROUP BY \"auth_user\".\"email\"\nprint(a[:1].query) # good\n# SELECT MAX(\"auth_user\".\"id\") AS \"m\" FROM \"auth_user\" WHERE \"auth_user\".\"email\" IS NULL GROUP BY \"auth_user\".\"email\" LIMIT 1\nb = models.User.objects.filter(id=a[:1])\nprint(b.query) # GROUP BY U0.\"id\" should be GROUP BY U0.\"email\"\n# SELECT ... FROM \"auth_user\" WHERE \"auth_user\".\"id\" = (SELECT U0.\"id\" FROM \"auth_user\" U0 WHERE U0.\"email\" IS NULL GROUP BY U0.\"id\" LIMIT 1)",
@@ -60,11 +60,9 @@
   },
   "query_focus": {
     "source_type": "query",
-    "source_text": "filtering over query result overrides GROUP BY of subquery in Django ORM",
+    "source_text": "GROUP BY overridden in subquery filter query result annotation values",
     "exact_symbols": [
-      "GROUP BY",
-      "subquery",
-      "Django ORM"
+      "GROUP BY"
     ],
     "file_hints": [],
     "class_hints": [],
@@ -72,25 +70,23 @@
     "method_hints": [],
     "parameter_hints": [],
     "behavior_terms": [
-      "filtering over query result",
-      "overrides GROUP BY",
-      "subquery GROUP BY behavior"
+      "subquery filter",
+      "annotation values overridden"
     ],
     "error_terms": [],
     "bm25_queries": [
-      "Django ORM GROUP BY subquery",
-      "filter subquery overrides GROUP BY",
-      "Django subquery annotation filtering"
+      "GROUP BY subquery annotation",
+      "subquery filter overriding annotations",
+      "annotations lost in subquery GROUP BY"
     ],
     "raw_keywords": [
-      "Django ORM",
       "subquery",
-      "GROUP BY",
-      "filtering",
+      "filter",
+      "annotation",
       "override"
     ],
-    "raw_llm_response": "```json\n{\n  \"exact_symbols\": [\"GROUP BY\", \"subquery\", \"Django ORM\"],\n  \"file_hints\": [],\n  \"class_hints\": [],\n  \"function_hints\": [],\n  \"method_hints\": [],\n  \"parameter_hints\": [],\n  \"behavior_terms\": [\"filtering over query result\", \"overrides GROUP BY\", \"subquery GROUP BY behavior\"],\n  \"error_terms\": [],\n  \"bm25_queries\": [\n    \"Django ORM GROUP BY subquery\",\n    \"filter subquery overrides GROUP BY\",\n    \"Django subquery annotation filtering\"\n  ],\n  \"raw_keywords\": [\"Django ORM\", \"subquery\", \"GROUP BY\", \"filtering\", \"override\"]\n}\n```",
+    "raw_llm_response": "{\n  \"exact_symbols\": [\"GROUP BY\"],\n  \"file_hints\": [],\n  \"class_hints\": [],\n  \"function_hints\": [],\n  \"method_hints\": [],\n  \"parameter_hints\": [],\n  \"behavior_terms\": [\"subquery filter\", \"annotation values overridden\"],\n  \"error_terms\": [],\n  \"bm25_queries\": [\n    \"GROUP BY subquery annotation\",\n    \"subquery filter overriding annotations\",\n    \"annotations lost in subquery GROUP BY\"\n  ],\n  \"raw_keywords\": [\"subquery\", \"filter\", \"annotation\", \"override\"]\n}",
     "extractor": "llm",
-    "created_at": 1778446131.4377441
+    "created_at": 1778484002.308844
   }
 }

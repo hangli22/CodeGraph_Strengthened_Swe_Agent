@@ -20,7 +20,7 @@ python mini_swe_agent_integration/run_swebench_batch.py \
   --api_base https://uni-api.cstcloud.cn/v1 \
   --subset lite \
   --split test \
-  --slice 20:30 \
+  --slice 29:30 \
   --output_dir ./results/retrieval_lihang_11_2 \
   --repos_dir ./repos \
   --cache_dir ./cache \
@@ -29,6 +29,17 @@ python mini_swe_agent_integration/run_swebench_batch.py \
   --use_docker \
   --docker_image sweagent-multipy:latest \
   --redo
+
+python -m swebench.harness.run_evaluation \
+  --dataset_name princeton-nlp/SWE-bench_Lite \
+  --split test \
+  --predictions_path ./results/retrieval_lihang_11/preds.json \
+  --max_workers 1 \
+  --run_id retrieval_lihang_11_10_30
+
+
+echo 'export DASHSCOPE_API_KEY="sk-2a0fc7cda034418288b275fa8265b428"' >> ~/.bashrc
+source ~/.bashrc
 
 以上为每次运行时的指令，可调整的参数：
 --mode为使用的模式，baseline为基准模式，retrieval为检索模式
@@ -175,10 +186,10 @@ cd ~/save/repos/slice_10_20
 cd ~/save/cache/slice_10_20
 
 将repos下复制到~/save/repos/slice_{num1}_{num2}，而非移动
-rsync -a --info=progress2 /home/hangli22/CodeAgent/files/repos/ ~/save/repos/slice_50_60/
+rsync -a --info=progress2 /home/hangli22/CodeAgent/files/repos/ ~/save/repos/slice_10_20/
 rsync -a --info=progress2 /home/hangli22/CodeAgent/files/cache/ ~/save/cache/slice_10_20/
 
-反之，将~/save/repos/slice_{num1}_{num2}下复制到repos，而非移动
+反之，将~/save/repos/slice_{num1}_{num2}下复制到repos/cache，而非移动
 rsync -a --info=progress2 ~/save/repos/slice_20_30/ /home/hangli22/CodeAgent/files/repos/
 rsync -a --info=progress2 ~/save/cache/slice_20_30/ /home/hangli22/CodeAgent/files/cache/
 
@@ -201,3 +212,81 @@ mkdir -p "$dst"
 find "$src" -mindepth 1 -maxdepth 1 -type d | sort | tail -10 | while read -r dir; do
   rsync -a --info=progress2 "$dir" "$dst/"
 done
+
+# 服务器~/.bashrc配置文件：
+wsl用户名称切换：
+su - codeagent
+登录服务器：
+ssh root@<your-server-ip>
+
+cat >> ~/.bashrc <<'EOF'
+
+## ===== CodeAgent / SWE-agent environment =====
+export UNI_API_KEY="d5f5ec7134e1d0d2f3cb5a04edcc367e9f05316a5fb0fb855f50f6f5fb93a275"
+export DASHSCOPE_API_KEY="sk-2a0fc7cda034418288b275fa8265b428"
+
+## Python UTF-8
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
+export PYTHONUNBUFFERED=1
+
+## pip behavior
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_DEFAULT_TIMEOUT=60
+export PIP_RETRIES=3
+
+## Hugging Face cache for SWE-bench
+export HF_HOME="$HOME/CodeAgent/hf_cache"
+
+## Hugging Face offline mode.
+## 只有确认 SWE-bench 数据集已经下载缓存后，再取消下面两行注释。
+## export HF_DATASETS_OFFLINE=1
+## export HF_HUB_OFFLINE=1
+EOF
+
+#
+## 
+ds_api_key:sk-75b3c972d7d741c8af75dda6bd943f5b
+## 测试连通性：
+export DEEPSEEK_API_KEY="sk-75b3c972d7d741c8af75dda6bd943f5b"
+
+python - <<'PY'
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ["DEEPSEEK_API_KEY"],
+    base_url="https://api.deepseek.com",
+)
+
+resp = client.chat.completions.create(
+    model="deepseek-v4-flash",
+    messages=[
+        {"role": "user", "content": "Say OK only."}
+    ],
+    temperature=0,
+)
+
+print(resp.choices[0].message.content)
+PY
+
+## 测试指令：
+初始29.15元
+
+python mini_swe_agent_integration/run_swebench_batch.py \
+  --mode retrieval \
+  --model_name openai/deepseek-v4-flash \
+  --api_base https://api.deepseek.com \
+  --api_key "$DEEPSEEK_API_KEY" \
+  --subset lite \
+  --split test \
+  --slice 29:30 \
+  --output_dir ./results/retrieval_deepseek_official_test \
+  --repos_dir ./repos \
+  --cache_dir ./cache \
+  --workers 1 \
+  --step_limit 60 \
+  --use_docker \
+  --docker_image sweagent-multipy:latest \
+  --redo
+

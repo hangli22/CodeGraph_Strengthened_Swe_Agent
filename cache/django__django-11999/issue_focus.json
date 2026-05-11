@@ -1,7 +1,7 @@
 {
   "version": 1,
   "instance_id": "django__django-11999",
-  "updated_at": 1778458827.4580445,
+  "updated_at": 1778499686.6140873,
   "initial_issue_focus": {
     "source_type": "initial_issue",
     "source_text": "Cannot override get_FOO_display() in Django 2.2+.\nDescription\n\t\nI cannot override the get_FIELD_display function on models since version 2.2. It works in version 2.1.\nExample:\nclass FooBar(models.Model):\n\tfoo_bar = models.CharField(_(\"foo\"), choices=[(1, 'foo'), (2, 'bar')])\n\tdef __str__(self):\n\t\treturn self.get_foo_bar_display() # This returns 'foo' or 'bar' in 2.2, but 'something' in 2.1\n\tdef get_foo_bar_display(self):\n\t\treturn \"something\"\nWhat I expect is that I should be able to override this function.",
@@ -43,38 +43,37 @@
   },
   "query_focus": {
     "source_type": "query",
-    "source_text": "get_FOO_display method in django/db/models base model",
+    "source_text": "get_FOO_display contribute_to_class add_to_class",
     "exact_symbols": [
-      "get_FOO_display"
+      "get_FOO_display",
+      "contribute_to_class",
+      "add_to_class"
     ],
-    "file_hints": [
-      "django/db/models/base.py"
-    ],
-    "class_hints": [
-      "Model"
-    ],
+    "file_hints": [],
+    "class_hints": [],
     "function_hints": [],
-    "method_hints": [
-      "get_FOO_display"
+    "method_hints": [],
+    "parameter_hints": [
+      "get_FOO_display",
+      "contribute_to_class",
+      "add_to_class"
     ],
-    "parameter_hints": [],
     "behavior_terms": [
-      "display value for field choices"
+      "get_foo_display",
+      "contribute_to_class",
+      "add_to_class"
     ],
     "error_terms": [],
     "bm25_queries": [
-      "get_FOO_display method",
-      "get_FOO_display Django model",
-      "django db models base get_FOO_display"
+      "get_FOO_display contribute_to_class add_to_class"
     ],
     "raw_keywords": [
-      "get_FOO_display",
-      "Django",
-      "model",
-      "choices"
+      "get_foo_display",
+      "contribute_to_class",
+      "add_to_class"
     ],
-    "raw_llm_response": "```json\n{\n  \"exact_symbols\": [\"get_FOO_display\"],\n  \"file_hints\": [\"django/db/models/base.py\"],\n  \"class_hints\": [\"Model\"],\n  \"function_hints\": [],\n  \"method_hints\": [\"get_FOO_display\"],\n  \"parameter_hints\": [],\n  \"behavior_terms\": [\"display value for field choices\"],\n  \"error_terms\": [],\n  \"bm25_queries\": [\n    \"get_FOO_display method\",\n    \"get_FOO_display Django model\",\n    \"django db models base get_FOO_display\"\n  ],\n  \"raw_keywords\": [\"get_FOO_display\", \"Django\", \"model\", \"choices\"]\n}\n```",
-    "extractor": "llm",
-    "created_at": 1778458827.4578054
+    "raw_llm_response": "",
+    "extractor": "rules_fallback",
+    "created_at": 1778499686.6102538
   }
 }

@@ -1,0 +1,22 @@
+diff --git a/django/db/migrations/autodetector.py b/django/db/migrations/autodetector.py
+index 1c40161c7f..4aac384020 100644
+--- a/django/db/migrations/autodetector.py
++++ b/django/db/migrations/autodetector.py
+@@ -928,6 +928,17 @@ class MigrationAutodetector:
+                     to_field_rename_key = rename_key + (remote_field_name,)
+                     if to_field_rename_key in self.renamed_fields:
+                         new_field.remote_field.field_name = old_field.remote_field.field_name
++                    else:
++                        # Check if the to_field refers to a renamed field (the
++                        # renamed_fields dict maps new_name -> old_name).
++                        for (ren_app_label, ren_model_name, ren_new_name), ren_old_name in self.renamed_fields.items():
++                            if (
++                                ren_app_label == rename_key[0] and
++                                ren_model_name == rename_key[1] and
++                                ren_old_name == remote_field_name
++                            ):
++                                new_field.remote_field.field_name = ren_new_name
++                                break
+                 # Handle ForeignObjects which can have multiple from_fields/to_fields.
+                 from_fields = getattr(new_field, 'from_fields', None)
+                 if from_fields:

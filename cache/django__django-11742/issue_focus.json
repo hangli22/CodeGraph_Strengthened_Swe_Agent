@@ -1,7 +1,7 @@
 {
   "version": 1,
   "instance_id": "django__django-11742",
-  "updated_at": 1778445460.4335968,
+  "updated_at": 1778483092.9251335,
   "initial_issue_focus": {
     "source_type": "initial_issue",
     "source_text": "Add check to ensure max_length fits longest choice.\nDescription\n\t\nThere is currently no check to ensure that Field.max_length is large enough to fit the longest value in Field.choices.\nThis would be very helpful as often this mistake is not noticed until an attempt is made to save a record with those values that are too long.",
@@ -45,36 +45,40 @@
   },
   "query_focus": {
     "source_type": "query",
-    "source_text": "django/db/models/fields/__init__.py Field class max_length choices",
-    "exact_symbols": [
-      "max_length",
-      "choices"
-    ],
+    "source_text": "django core checks field choices validation model field",
+    "exact_symbols": [],
     "file_hints": [
-      "django/db/models/fields/__init__.py"
+      "django/core/checks/field.py"
     ],
     "class_hints": [
-      "Field"
+      "model field"
     ],
     "function_hints": [],
     "method_hints": [],
     "parameter_hints": [
-      "max_length",
       "choices"
     ],
-    "behavior_terms": [],
+    "behavior_terms": [
+      "field choices validation",
+      "model field choices check"
+    ],
     "error_terms": [],
     "bm25_queries": [
-      "Field class max_length",
-      "Field class choices",
-      "django Field max_length choices"
+      "django field choices validation",
+      "model field choices check",
+      "Django choices validation"
     ],
     "raw_keywords": [
-      "max_length",
-      "choices"
+      "django",
+      "core",
+      "checks",
+      "field",
+      "choices",
+      "validation",
+      "model"
     ],
-    "raw_llm_response": "```json\n{\n  \"exact_symbols\": [\"max_length\", \"choices\"],\n  \"file_hints\": [\"django/db/models/fields/__init__.py\"],\n  \"class_hints\": [\"Field\"],\n  \"function_hints\": [],\n  \"method_hints\": [],\n  \"parameter_hints\": [\"max_length\", \"choices\"],\n  \"behavior_terms\": [],\n  \"error_terms\": [],\n  \"bm25_queries\": [\n    \"Field class max_length\",\n    \"Field class choices\",\n    \"django Field max_length choices\"\n  ],\n  \"raw_keywords\": [\"max_length\", \"choices\"]\n}\n```",
+    "raw_llm_response": "```json\n{\n  \"exact_symbols\": [],\n  \"file_hints\": [\"django/core/checks/field.py\"],\n  \"class_hints\": [\"model field\"],\n  \"function_hints\": [],\n  \"method_hints\": [],\n  \"parameter_hints\": [\"choices\"],\n  \"behavior_terms\": [\"field choices validation\", \"model field choices check\"],\n  \"error_terms\": [],\n  \"bm25_queries\": [\n    \"django field choices validation\",\n    \"model field choices check\",\n    \"Django choices validation\"\n  ],\n  \"raw_keywords\": [\"django\", \"core\", \"checks\", \"field\", \"choices\", \"validation\", \"model\"]\n}\n```",
     "extractor": "llm",
-    "created_at": 1778445460.4334042
+    "created_at": 1778483092.9250433
   }
 }

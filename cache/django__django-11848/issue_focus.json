@@ -1,7 +1,7 @@
 {
   "version": 1,
   "instance_id": "django__django-11848",
-  "updated_at": 1778453130.0209901,
+  "updated_at": 1778485719.1200461,
   "initial_issue_focus": {
     "source_type": "initial_issue",
     "source_text": "django.utils.http.parse_http_date two digit year check is incorrect\nDescription\n\t \n\t\t(last modified by Ad Timmering)\n\t \nRFC 850 does not mention this, but in RFC 7231 (and there's something similar in RFC 2822), there's the following quote:\nRecipients of a timestamp value in rfc850-date format, which uses a\ntwo-digit year, MUST interpret a timestamp that appears to be more\nthan 50 years in the future as representing the most recent year in\nthe past that had the same last two digits.\nCurrent logic is hard coded to consider 0-69 to be in 2000-2069, and 70-99 to be 1970-1999, instead of comparing versus the current year.",
@@ -44,14 +44,11 @@
   },
   "query_focus": {
     "source_type": "query",
-    "source_text": "django.utils.http.parse_http_date two digit year RFC 850",
+    "source_text": "parse_http_date two digit year RFC 850 RFC 7231",
     "exact_symbols": [
-      "parse_http_date",
-      "django.utils.http"
+      "parse_http_date"
     ],
-    "file_hints": [
-      "django/utils/http.py"
-    ],
+    "file_hints": [],
     "class_hints": [],
     "function_hints": [
       "parse_http_date"
@@ -60,21 +57,22 @@
     "parameter_hints": [],
     "behavior_terms": [
       "two digit year",
-      "RFC 850"
+      "RFC 850",
+      "RFC 7231"
     ],
     "error_terms": [],
     "bm25_queries": [
       "parse_http_date two digit year",
-      "RFC 850 year parsing",
-      "django.utils.http year"
+      "parse_http_date RFC 850",
+      "parse_http_date RFC 7231"
     ],
     "raw_keywords": [
       "two digit year",
       "RFC 850",
-      "http date parsing"
+      "RFC 7231"
     ],
-    "raw_llm_response": "{\n  \"exact_symbols\": [\"parse_http_date\", \"django.utils.http\"],\n  \"file_hints\": [\"django/utils/http.py\"],\n  \"class_hints\": [],\n  \"function_hints\": [\"parse_http_date\"],\n  \"method_hints\": [],\n  \"parameter_hints\": [],\n  \"behavior_terms\": [\"two digit year\", \"RFC 850\"],\n  \"error_terms\": [],\n  \"bm25_queries\": [\n    \"parse_http_date two digit year\",\n    \"RFC 850 year parsing\",\n    \"django.utils.http year\"\n  ],\n  \"raw_keywords\": [\"two digit year\", \"RFC 850\", \"http date parsing\"]\n}",
+    "raw_llm_response": "{\n  \"exact_symbols\": [\"parse_http_date\"],\n  \"file_hints\": [],\n  \"class_hints\": [],\n  \"function_hints\": [\"parse_http_date\"],\n  \"method_hints\": [],\n  \"parameter_hints\": [],\n  \"behavior_terms\": [\"two digit year\", \"RFC 850\", \"RFC 7231\"],\n  \"error_terms\": [],\n  \"bm25_queries\": [\n    \"parse_http_date two digit year\",\n    \"parse_http_date RFC 850\",\n    \"parse_http_date RFC 7231\"\n  ],\n  \"raw_keywords\": [\"two digit year\", \"RFC 850\", \"RFC 7231\"]\n}",
     "extractor": "llm",
-    "created_at": 1778453130.020804
+    "created_at": 1778485719.1198788
   }
 }
