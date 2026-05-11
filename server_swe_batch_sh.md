@@ -1,3 +1,4 @@
+cat > ~/server_swe_batch.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -28,7 +29,7 @@ SSH_OPTS="${SSH_OPTS:-}"
 RSYNC_SSH="ssh ${SSH_OPTS}"
 
 usage() {
-  cat <<EOF
+  cat <<EOF_USAGE
 Usage:
   $0 submit  START END     # upload repos/cache and start remote job in background
   $0 status  START END     # show remote pid/status
@@ -50,7 +51,7 @@ Env overrides:
   LOCAL_SAVE_ROOT=~/save
   LOCAL_RESULT_ROOT=~/save/server_results
   RUN_PREFIX=retrieval_server
-EOF
+EOF_USAGE
 }
 
 need_args() {
@@ -133,7 +134,7 @@ submit_job() {
     "${SERVER}:${REMOTE_PROJECT}/cache/"
 
   echo "==> Creating remote run script"
-  ssh_remote "bash -s" <<EOF
+  ssh_remote "bash -s" <<EOF_REMOTE
 set -euo pipefail
 
 REMOTE_PROJECT="${REMOTE_PROJECT}"
@@ -158,26 +159,45 @@ set -euo pipefail
 
 cd "__REMOTE_PROJECT__"
 
-source /root/miniforge3/etc/profile.d/conda.sh
-conda activate sweagent
-
-# Keep HF offline/mirror settings from ~/.bashrc when available.
+# Load user shell settings first.
+# Important: /root/.bashrc may auto-activate conda base or rewrite PATH.
+# Therefore we source it BEFORE activating the target sweagent environment.
 if [[ -f /root/.bashrc ]]; then
   set +u
   source /root/.bashrc || true
   set -u
 fi
 
+# Activate the target runtime environment last so it cannot be overwritten by .bashrc.
+source /root/miniforge3/etc/profile.d/conda.sh
+conda activate sweagent
+hash -r
+
 export PYTHONUNBUFFERED=1
 export PYTHONUTF8=1
 export PYTHONIOENCODING=utf-8
+
+PYTHON_BIN="$(command -v python)"
+
+echo "[server-debug] CONDA_DEFAULT_ENV=${CONDA_DEFAULT_ENV:-}"
+echo "[server-debug] python=${PYTHON_BIN}"
+"${PYTHON_BIN}" - <<'PY'
+import sys
+print("[server-debug] sys.executable=", sys.executable)
+try:
+    import datasets
+    print("[server-debug] datasets ok:", getattr(datasets, "__version__", "unknown"))
+except Exception as e:
+    print("[server-debug] datasets failed:", repr(e))
+    raise
+PY
 
 OUT_NAME="__OUT_NAME__"
 RUN_ID="__RUN_ID__"
 START="__START__"
 END="__END__"
 
-BATCH="python mini_swe_agent_integration/run_swebench_batch.py \
+BATCH="${PYTHON_BIN} mini_swe_agent_integration/run_swebench_batch.py \
   --mode __MODE__ \
   --model_name __MODEL_NAME__ \
   --api_base __API_BASE__ \
@@ -201,7 +221,7 @@ echo "[server] out_name: \${OUT_NAME}"
 echo "[server] run_id: \${RUN_ID}"
 echo "[server] batch: \${BATCH}"
 
-python run_and_analyse.py \
+"${PYTHON_BIN}" run_and_analyse.py \
   --batch-cmd "\${BATCH}" \
   --run-id "\${RUN_ID}" \
   --running-log "./results/\${OUT_NAME}/running.md" \
@@ -212,6 +232,7 @@ EOS
 
 python3 - <<PY
 from pathlib import Path
+
 p = Path("${REMOTE_PROJECT}/_server_runs/run_${out_name}.sh")
 text = p.read_text()
 repls = {
@@ -235,7 +256,7 @@ p.write_text(text)
 PY
 
 chmod +x "\${REMOTE_PROJECT}/_server_runs/run_\${OUT_NAME}.sh"
-EOF
+EOF_REMOTE
 
   echo "==> Starting remote job with nohup"
   ssh_remote "bash -lc '
@@ -463,3 +484,6 @@ main() {
 }
 
 main "$@"
+EOF
+
+chmod +x ~/server_swe_batch.sh
