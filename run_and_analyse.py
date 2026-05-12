@@ -1,72 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
+import os
 import shlex
 import subprocess
 import sys
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-"""
-运行模板：
-BATCH='python mini_swe_agent_integration/run_swebench_batch.py --mode retrieval --model_name openai/deepseek-v4-flash --api_base https://uni-api.cstcloud.cn/v1 --subset lite --split test --slice 10:30 --output_dir ./results/retrieval_lihang_11 --repos_dir ./repos --cache_dir ./cache --workers 1 --step_limit 60 --use_docker --docker_image sweagent-multipy:latest --redo'
 
-python run_and_analyse.py \
-  --batch-cmd "$BATCH" \
-  --running-log running.md \
-  --analyse-log annlyse_result.md
-
-ds运行模板：
-export DEEPSEEK_API_KEY='sk-670a8b43bf1c4988889c95cdc5f74ecd'
-BATCH="python mini_swe_agent_integration/run_swebench_batch.py \
-  --mode retrieval \
-  --llm_backend deepseek \
-  --model_name openai/deepseek-v4-flash \
-  --subset lite \
-  --split test \
-  --slice 0:1 \
-  --output_dir ./results/smoke_ds_0_1 \
-  --repos_dir ./repos \
-  --cache_dir ./cache \
-  --workers 1 \
-  --step_limit 60 \
-  --use_docker \
-  --docker_image sweagent-multipy:latest \
-  --redo"
-  python run_and_analyse.py \
-  --batch-cmd "$BATCH" \
-  --running-log running_ds.md \
-  --analyse-log analyse_ds.md
-
-  uni运行模板：
-  export DEEPSEEK_API_KEY='sk-670a8b43bf1c4988889c95cdc5f74ecd'
-  BATCH="python mini_swe_agent_integration/run_swebench_batch.py \
-  --mode retrieval \
-  --llm_backend uni \
-  --model_name openai/deepseek-v4-flash \
-  --subset lite \
-  --split test \
-  --slice 0:1 \
-  --output_dir ./results/smoke_uni_0_1 \
-  --repos_dir ./repos \
-  --cache_dir ./cache \
-  --workers 1 \
-  --step_limit 60 \
-  --use_docker \
-  --docker_image sweagent-multipy:latest \
-  --redo"
-  python run_and_analyse.py \
-  --batch-cmd "$BATCH" \
-  --running-log running_uni.md \
-  --analyse-log analyse_uni.md
-
-
-
-
-"""
-# 尚未测试
 # =========================
 # Config
 # =========================
@@ -75,6 +21,14 @@ DEFAULT_OUTPUT_DIR = Path("./results/retrieval_lihang_11")
 DEFAULT_SLICE = "10:30"
 
 LOGS_ROOT = Path("./logs/run_evaluation")
+
+# 全服务器共享锁。
+# 目的：允许多个 server_swe_batch.sh / run_and_analyse.py 并行跑 agent，
+# 但只允许一个进程同时进入 SWE-bench harness evaluation。
+#
+# 可通过环境变量覆盖：
+#   export SWEBENCH_EVAL_LOCK_PATH=/tmp/swebench_eval.lock
+EVAL_LOCK_PATH = Path(os.environ.get("SWEBENCH_EVAL_LOCK_PATH", "/tmp/swebench_eval.lock"))
 
 BATCH_CMD = [
     sys.executable,
@@ -95,12 +49,14 @@ BATCH_CMD = [
     "--redo",
 ]
 
+
 # =========================
 # Helpers
 # =========================
 
 def shell_quote_cmd(cmd: list[str]) -> str:
     return " ".join(shlex.quote(x) for x in cmd)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -124,6 +80,19 @@ def parse_args() -> argparse.Namespace:
         default="annlyse_result.md",
         help="评测与逐条分析输出文件，默认 annlyse_result.md。",
     )
+    parser.add_argument(
+        "--eval-lock-path",
+        default=None,
+        help=(
+            "SWE-bench harness evaluation 的全服务器锁文件路径。"
+            "默认读取环境变量 SWEBENCH_EVAL_LOCK_PATH；否则使用 /tmp/swebench_eval.lock。"
+        ),
+    )
+    parser.add_argument(
+        "--no-eval-lock",
+        action="store_true",
+        help="禁用 evaluation 全局锁。不建议在同一服务器多进程评测时使用。",
+    )
     return parser.parse_args()
 
 
@@ -137,7 +106,9 @@ def get_option_value(cmd: list[str], option: str, default: str | None = None) ->
       --output_dir xxx
       --slice 10:30
 
-    不处理 --key=value 以外的复杂 shell 语义；传入前已经 shlex.split。
+    也兼容：
+      --output_dir=xxx
+      --slice=10:30
     """
     for i, token in enumerate(cmd):
         if token == option and i + 1 < len(cmd):
@@ -186,6 +157,7 @@ def build_eval_cmd(preds_path: Path, run_id: str) -> list[str]:
         "--run_id", run_id,
     ]
 
+
 def write_header(path: Path, title: str, cmd: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -210,8 +182,18 @@ def close_code_block(path: Path) -> None:
     append_text(path, "\n```\n")
 
 
-def run_and_log(cmd: list[str], log_path: Path, title: str) -> int:
+def run_and_log(
+    cmd: list[str],
+    log_path: Path,
+    title: str,
+    pre_output_text: str = "",
+) -> int:
     write_header(log_path, title, cmd)
+
+    if pre_output_text:
+        append_text(log_path, pre_output_text)
+        if not pre_output_text.endswith("\n"):
+            append_text(log_path, "\n")
 
     proc = subprocess.Popen(
         cmd,
@@ -238,13 +220,54 @@ def run_and_log(cmd: list[str], log_path: Path, title: str) -> int:
     return returncode
 
 
-def load_preds(preds_path: Path) -> dict:
+@contextmanager
+def evaluation_lock(lock_path: Path):
+    """
+    服务器级互斥锁。
+
+    这个锁只保护 SWE-bench harness evaluation 阶段。
+    不锁 agent batch 阶段，避免把多个进程完全串行化。
+
+    为什么用 fcntl.flock：
+    - Linux 原生可用；
+    - 同一台服务器所有项目目录共享同一个锁文件；
+    - 进程异常退出时，文件锁会随 fd 关闭自动释放。
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with lock_path.open("a+", encoding="utf-8") as f:
+        f.write(
+            f"[{datetime.now().isoformat(timespec='seconds')}] "
+            f"pid={os.getpid()} waiting for evaluation lock\n"
+        )
+        f.flush()
+
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+
+        f.write(
+            f"[{datetime.now().isoformat(timespec='seconds')}] "
+            f"pid={os.getpid()} acquired evaluation lock\n"
+        )
+        f.flush()
+
+        try:
+            yield
+        finally:
+            f.write(
+                f"[{datetime.now().isoformat(timespec='seconds')}] "
+                f"pid={os.getpid()} released evaluation lock\n"
+            )
+            f.flush()
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def load_preds(preds_path: Path):
     if not preds_path.exists():
         raise FileNotFoundError(f"preds.json not found: {preds_path}")
     return json.loads(preds_path.read_text(encoding="utf-8"))
 
 
-def normalize_pred_items(preds: dict) -> dict:
+def normalize_pred_items(preds) -> dict:
     """
     支持两种常见格式：
     1. {instance_id: {...}}
@@ -263,7 +286,12 @@ def normalize_pred_items(preds: dict) -> dict:
     raise ValueError(f"Unsupported preds format: {type(preds)}")
 
 
-def collect_eval_status_from_json(obj, resolved: set[str], failed: set[str], errored: set[str]) -> None:
+def collect_eval_status_from_json(
+    obj,
+    resolved: set[str],
+    failed: set[str],
+    errored: set[str],
+) -> None:
     """
     尽量兼容 swebench 不同版本的 report/results json 结构。
     """
@@ -366,7 +394,12 @@ def infer_from_test_output(instance_id: str, run_id: str) -> str | None:
     return "RAN"
 
 
-def append_per_instance_summary(preds_path: Path, output_dir: Path, run_id: str, analyse_log: Path) -> None:
+def append_per_instance_summary(
+    preds_path: Path,
+    output_dir: Path,
+    run_id: str,
+    analyse_log: Path,
+) -> None:
     preds = normalize_pred_items(load_preds(preds_path))
 
     resolved, failed, errored, json_files = parse_eval_jsons(run_id)
@@ -466,13 +499,19 @@ def main() -> int:
 
     eval_cmd = build_eval_cmd(preds_path, run_id)
 
+    if args.eval_lock_path:
+        eval_lock_path = Path(args.eval_lock_path)
+    else:
+        eval_lock_path = EVAL_LOCK_PATH
+
     print("Resolved config:")
-    print(f"- slice      : {slice_value}")
-    print(f"- output_dir : {output_dir}")
-    print(f"- preds_path : {preds_path}")
-    print(f"- run_id     : {run_id}")
-    print(f"- running_log: {running_log}")
-    print(f"- analyse_log: {analyse_log}")
+    print(f"- slice        : {slice_value}")
+    print(f"- output_dir   : {output_dir}")
+    print(f"- preds_path   : {preds_path}")
+    print(f"- run_id       : {run_id}")
+    print(f"- running_log  : {running_log}")
+    print(f"- analyse_log  : {analyse_log}")
+    print(f"- eval_lock    : {'disabled' if args.no_eval_lock else eval_lock_path}")
 
     print("\nStep 1/3: running SWE-agent batch. Output ->", running_log)
     batch_code = run_and_log(batch_cmd, running_log, "SWE-agent batch running log")
@@ -486,7 +525,34 @@ def main() -> int:
         return batch_code or 1
 
     print("Step 2/3: running SWE-bench harness evaluation. Output ->", analyse_log)
-    eval_code = run_and_log(eval_cmd, analyse_log, "SWE-bench evaluation log")
+
+    eval_prelude = (
+        f"[run_and_analyse] pid={os.getpid()}\n"
+        f"[run_and_analyse] eval_lock={'disabled' if args.no_eval_lock else str(eval_lock_path)}\n"
+        f"[run_and_analyse] started_eval_step_at={datetime.now().isoformat(timespec='seconds')}\n"
+    )
+
+    if args.no_eval_lock:
+        eval_code = run_and_log(
+            eval_cmd,
+            analyse_log,
+            "SWE-bench evaluation log",
+            pre_output_text=eval_prelude,
+        )
+    else:
+        print(f"Waiting for SWE-bench evaluation lock: {eval_lock_path}")
+        with evaluation_lock(eval_lock_path):
+            print(f"Acquired SWE-bench evaluation lock: {eval_lock_path}")
+            eval_code = run_and_log(
+                eval_cmd,
+                analyse_log,
+                "SWE-bench evaluation log",
+                pre_output_text=(
+                    eval_prelude
+                    + f"[run_and_analyse] acquired_eval_lock_at={datetime.now().isoformat(timespec='seconds')}\n"
+                ),
+            )
+        print(f"Released SWE-bench evaluation lock: {eval_lock_path}")
 
     print("Step 3/3: appending per-instance summary ->", analyse_log)
     append_per_instance_summary(

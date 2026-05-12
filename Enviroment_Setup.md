@@ -275,10 +275,10 @@ Python 3.11.x
 如果从 GitHub 克隆：
 
 ```bash
-mkdir -p ~/CodeAgent
-cd ~/CodeAgent
-git clone https://github.com/hangli22/CodeGraph_Strengthened_Swe_Agent.git files
-cd files
+mkdir -p ~/CodeAgent1
+cd ~/CodeAgent1
+git clone https://github.com/hangli22/CodeGraph_Strengthened_Swe_Agent.git files1
+cd files1
 ```
 
 如果从 Windows 复制项目，建议复制到 WSL 文件系统：
@@ -772,3 +772,56 @@ PY
 - [ ] SWE-bench Lite 已成功下载
 - [ ] Docker 镜像 `sweagent-multipy:latest` 已构建
 - [ ] `--slice` 使用英文冒号，例如 `20:21`
+
+
+一、预防 GitHub raw requirements 问题
+1. 给 SWE-bench harness 打缓存补丁
+这一步的目的：
+让 get_requirements_by_commit() 下载到的 requirements 文件缓存到本地。以后如果 GitHub raw 抖动，只要之前缓存过，就不会失败。
+执行：
+PYFILE=$(python - <<'PY'import swebench.harness.test_spec.python as pprint(p.__file__)PY)echo "PYFILE=$PYFILE"cp "$PYFILE" "${PYFILE}.bak.$(date +%Y%m%d_%H%M%S)"
+然后替换函数：
+python - <<'PY'from pathlib import Pathpath = Path(__import__("swebench.harness.test_spec.python", fromlist=[""]).__file__)text = path.read_text(encoding="utf-8")start = text.index("def get_requirements_by_commit(")end = text.index("\ndef clean_requirements(", start)new_func = r'''def get_requirements_by_commit(repo: str, commit: str) -> str:    """    Get requirements.txt from repo at specific commit.    Local patch:    - Cache raw.githubusercontent.com requirements files under      $SWEBENCH_RAW_REQ_CACHE_DIR or /root/CodeAgent/swebench_raw_req_cache.    - Cache both the main requirements file and recursive -r requirements files.    - If network download fails but cached file exists, reuse cached file.    """    import os    import re    import requests    cache_root = os.environ.get(        "SWEBENCH_RAW_REQ_CACHE_DIR",        "/root/CodeAgent/swebench_raw_req_cache",    )    os.makedirs(cache_root, exist_ok=True)    def _safe_cache_name(url: str) -> str:        return re.sub(r"[^A-Za-z0-9_.-]+", "__", url)    def _get_url_text(url: str) -> tuple[int, str]:        cache_path = os.path.join(cache_root, _safe_cache_name(url))        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:            with open(cache_path, "r", encoding="utf-8") as f:                return 200, f.read()        try:            resp = requests.get(url, headers=HEADERS, timeout=60)            if resp.status_code == 200:                with open(cache_path, "w", encoding="utf-8") as f:                    f.write(resp.text)                return resp.status_code, resp.text            return resp.status_code, resp.text        except Exception:            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:                with open(cache_path, "r", encoding="utf-8") as f:                    return 200, f.read()            raise    for req_path in MAP_REPO_TO_REQS_PATHS[repo]:        reqs_url = posixpath.join(SWE_BENCH_URL_RAW, repo, commit, req_path)        status_code, reqs_text = _get_url_text(reqs_url)        if status_code == 200:            break    else:        raise ValueError(            f"Could not find requirements.txt at paths {MAP_REPO_TO_REQS_PATHS[repo]} for repo {repo} at commit {commit}"        )    lines = reqs_text    original_req = []    additional_reqs = []    req_dir = "/".join(req_path.split("/")[:-1])    exclude_line = lambda line: any(        [line.strip().startswith(x) for x in ["-e .", "#", ".[test"]]    )    for line in lines.split("\n"):        if line.strip().startswith("-r"):            file_name = line[len("-r") :].strip()            reqs_url = posixpath.join(                SWE_BENCH_URL_RAW,                repo,                commit,                req_dir,                file_name,            )            status_code, extra_text = _get_url_text(reqs_url)            if status_code == 200:                for line_extra in extra_text.split("\n"):                    if not exclude_line(line_extra):                        additional_reqs.append(line_extra)        else:            if not exclude_line(line):                original_req.append(line)    additional_reqs.append("\n".join(original_req))    all_reqs = "\n".join(additional_reqs)    return all_reqs'''path.write_text(text[:start] + new_func + text[end+1:], encoding="utf-8")print("patched:", path)PY
+检查：
+python -m py_compile "$PYFILE"python - <<'PY'import inspectimport swebench.harness.test_spec.python as psrc = inspect.getsource(p.get_requirements_by_commit)print("module:", p.__file__)print("has_cache_patch:", "SWEBENCH_RAW_REQ_CACHE_DIR" in src)print("has_timeout_60:", "timeout=60" in src)PY
+正常应该看到：
+has_cache_patch: Truehas_timeout_60: True
+2. 设置缓存目录
+建议写进 ~/.bashrc：
+grep -q 'SWEBENCH_RAW_REQ_CACHE_DIR' ~/.bashrc || cat >> ~/.bashrc <<'EOF'# SWE-bench raw GitHub requirements cacheexport SWEBENCH_RAW_REQ_CACHE_DIR=/root/CodeAgent/swebench_raw_req_cacheEOFsource ~/.bashrcconda activate sweagentmkdir -p "$SWEBENCH_RAW_REQ_CACHE_DIR"
+3. 预热一个已知容易触发的 requirements 文件
+python - <<'PY'import swebench.harness.test_spec.python as ptxt = p.get_requirements_by_commit(    "matplotlib/matplotlib",    "28289122be81e0bc0a6ee0c4c5b7343a46ce2e4e",)print("ok length:", len(txt))print(txt[:300])PY
+只要这里成功，以后同类 raw requirements 下载问题会少很多。
+
+二、预防 Docker eval 镜像问题
+1. 配置可用 Docker 镜像源
+先备份：
+sudo cp /etc/docker/daemon.json /etc/docker/daemon.json.bak.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+写入镜像源：
+sudo tee /etc/docker/daemon.json >/dev/null <<'JSON'{  "registry-mirrors": [    "https://docker.1ms.run",    "https://docker.xuanyuan.me",    "https://dockerproxy.com"  ],  "features": {    "buildkit": true  }}JSONsudo systemctl daemon-reloadsudo systemctl restart docker
+检查：
+docker info | sed -n '/Registry Mirrors/,+10p'
+应该能看到：
+https://docker.1ms.run/https://docker.xuanyuan.me/https://dockerproxy.com/
+2. 预拉一个 SWE-bench eval 镜像测试
+docker pull swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest
+如果它开始下载 layer，并最终出现：
+Pull complete
+或者：
+Downloaded newer image
+说明这台服务器的 Docker 拉 SWE-bench eval 镜像基本可用。
+
+三、正式评测前的一键健康检查
+以后每台服务器跑评测前，可以先执行：
+cd /root/CodeAgent/filessource ~/.bashrcconda activate sweagentecho "== Python =="which pythonpython --versionecho "== SWE-bench patch =="python - <<'PY'import inspectimport swebench.harness.test_spec.python as psrc = inspect.getsource(p.get_requirements_by_commit)print("module:", p.__file__)print("has_cache_patch:", "SWEBENCH_RAW_REQ_CACHE_DIR" in src)PYecho "== raw GitHub =="python - <<'PY'import swebench.harness.test_spec.python as ptxt = p.get_requirements_by_commit(    "matplotlib/matplotlib",    "28289122be81e0bc0a6ee0c4c5b7343a46ce2e4e",)print("requirements length:", len(txt))PYecho "== Docker mirrors =="docker info | sed -n '/Registry Mirrors/,+10p'echo "== Docker pull test =="docker pull swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latestecho "== Disk =="df -hdocker system df
+这几个都通过后，再跑：
+/root/miniforge3/envs/sweagent/bin/python -m swebench.harness.run_evaluation \  --dataset_name princeton-nlp/SWE-bench_Lite \  --split test \  --predictions_path results/你的结果目录/preds.json \  --max_workers 1 \  --run_id 你的run_id
+
+四、额外建议：不要让两个 harness 同时第一次拉镜像
+如果服务器上还没缓存 SWE-bench eval 镜像，第一次评测时建议：
+--max_workers 1
+并且不要两个 run_evaluation 同时跑。因为第一次会大量拉镜像、构建/启动容器，两个进程同时跑更容易触发网络超时、镜像源限流、磁盘 IO 抖动。
+等常用 eval 镜像拉完之后，再并行会稳很多。
+
+结论：
+新服务器从头预防，就做两件事：先给 SWE-bench harness 打 raw requirements 本地缓存补丁；再配置可用 Docker registry mirrors 并预拉一个 swebench/sweb.eval... 镜像测试。

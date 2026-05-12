@@ -1,4 +1,4 @@
-cat > ~/server_swe_batch.sh <<'EOF'
+cat ~/server_swe_batch.sh
 #!/usr/bin/env bash
 set -euo pipefail
 

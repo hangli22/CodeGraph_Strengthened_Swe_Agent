@@ -116,7 +116,7 @@ python run_and_analyse.py \
   --analyse-log annlyse_result.md
 
 ## 评测指令
-python -m swebench.harness.run_evaluation   --dataset_name princeton-nlp/SWE-bench_Lite   --split test   --predictions_path ./results/retrieval_lihang_11/preds.json   --max_workers 1   --run_id retrieval_0_11
+python -m swebench.harness.run_evaluation   --dataset_name princeton-nlp/SWE-bench_Lite   --split test   --predictions_path ./results/retrieval_server_0_10/preds.json  --max_workers 1   --run_id retrieval_0_11
 
 以上是评测preds的指令，注意路径名字是否正确
 
