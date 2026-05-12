@@ -336,11 +336,40 @@ SSH_OPTS="-i ~/.ssh/id_ed25519"
 chmod +x ~/server_swe_batch.sh
 之后再运行:
 ## 上传 slice 并让服务器后台运行
+### 新版-用ds跑：
+LLM_BACKEND=deepseek \
+MODEL_NAME=openai/deepseek-v4-flash \
+~/server_swe_batch.sh run 0 20
+
+用uni跑：
+
+
 ~/server_swe_batch.sh submit 20 30
 作用：
 上传 ~/save/repos/slice_20_30/ 到服务器 repos/
 上传 ~/save/cache/slice_20_30/ 到服务器 cache/
 服务器 nohup 后台运行 slice 20:30
+
+## 服务器多线程实验：
+假设你复制了：
+/root/CodeAgent/files_ds2
+
+那么第二个实验可以这样启动：
+REMOTE_PROJECT=/root/CodeAgent/files_ds2 \
+RUN_PREFIX=retrieval_server_ds2 \
+LLM_BACKEND=deepseek \
+MODEL_NAME=openai/deepseek-v4-flash \
+~/server_swe_batch.sh run 20 40
+
+第一个任务仍然在：
+/root/CodeAgent/files
+
+第二个任务在：
+/root/CodeAgent/files_ds2
+
+这样不会互相清空 repos/cache。
+
+
 
 ## 查看服务器任务状态
 ~/server_swe_batch.sh status 20 30

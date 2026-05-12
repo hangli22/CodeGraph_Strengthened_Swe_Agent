@@ -7,11 +7,15 @@ set -euo pipefail
 # Run this script on your LOCAL WSL machine.
 #
 # Single-slice commands:
-#   submit/status/tail/fetch/cleanup START END
+#   submit/status/tail/fetch/cleanup/abort-clean START END
 #
 # Sequential range command:
 #   run START END
 #   Example: run 0 30 => run 0:10, 10:20, 20:30 sequentially.
+#
+# Safety:
+#   By default, if the local result dir already exists, submit/run refuses to start.
+#   Use FORCE=1 to delete local result dir and remote old result before running.
 # =========================
 
 # ---- Basic config ----
@@ -44,31 +48,79 @@ RSYNC_SSH="ssh ${SSH_OPTS}"
 
 CHUNK_SIZE="${CHUNK_SIZE:-10}"
 
+# If FORCE=1:
+#   - submit/run deletes local result dir for the slice before running
+#   - submit/run deletes remote old result/run script for the slice before running
+# It does NOT delete local cache.
+FORCE="${FORCE:-0}"
+
+# ---- Hard safety checks ----
+: "${SERVER:?SERVER is empty}"
+: "${REMOTE_PROJECT:?REMOTE_PROJECT is empty}"
+: "${LOCAL_SAVE_ROOT:?LOCAL_SAVE_ROOT is empty}"
+: "${LOCAL_RESULT_ROOT:?LOCAL_RESULT_ROOT is empty}"
+: "${RUN_PREFIX:?RUN_PREFIX is empty}"
+: "${CHUNK_SIZE:?CHUNK_SIZE is empty}"
+
+if [[ "$REMOTE_PROJECT" != /* ]]; then
+  echo "ERROR: REMOTE_PROJECT must be an absolute path: $REMOTE_PROJECT"
+  exit 1
+fi
+
+case "$REMOTE_PROJECT" in
+  "/"|"/root"|"/root/"|"/root/CodeAgent"|"/root/CodeAgent/")
+    echo "ERROR: REMOTE_PROJECT is too broad/dangerous: $REMOTE_PROJECT"
+    exit 1
+    ;;
+esac
+
+if [[ "$LOCAL_SAVE_ROOT" == "/" || "$LOCAL_RESULT_ROOT" == "/" ]]; then
+  echo "ERROR: local root path is dangerous."
+  exit 1
+fi
+
 usage() {
   cat <<EOF_USAGE
 Usage:
-  $0 submit  START END     # upload one slice repos/cache and start remote job in background
-  $0 status  START END     # show remote pid/status for one slice
-  $0 tail    START END     # tail remote server log for one slice
-  $0 fetch   START END     # download results/logs for one slice
-  $0 cleanup START END     # remove remote repos/cache and this slice results/log hints
-  $0 run     START END     # run one or multiple 10-size slices sequentially, fetch each, cleanup remote between slices
+  $0 submit      START END     # upload one slice repos/cache and start remote job in background
+  $0 status      START END     # show remote pid/status for one slice
+  $0 tail        START END     # tail remote server log for one slice
+  $0 fetch       START END     # download results/logs for one slice
+  $0 cleanup     START END     # remove remote repos/cache and this slice remote results/log hints; prompt required
+  $0 abort-clean START END     # kill remote job, clean remote repos/cache/results, clean local result; keep local cache
+  $0 run         START END     # run one or multiple 10-size slices sequentially, fetch each, cleanup remote between slices
 
 Examples:
   $0 submit 20 30
-  $0 tail 20 30
   $0 status 20 30
+  $0 tail 20 30
   $0 fetch 20 30
   $0 cleanup 20 30
+  $0 abort-clean 20 30
 
   $0 run 20 30
-  $0 run 0 30      # runs 0:10, 10:20, 20:30 sequentially
-  $0 run 30 60     # runs 30:40, 40:50, 50:60 sequentially
+  $0 run 0 30
+  $0 run 30 60
+
+Overwrite protection:
+  Default: if local result dir exists, refuse to run.
+  FORCE=1 $0 run 20 30
+    -> deletes local result dir for 20:30 and remote old result before running.
+    -> does NOT delete local cache.
 
 Backend examples:
   LLM_BACKEND=uni MODEL_NAME=openai/deepseek-v4-flash $0 run 20 30
   LLM_BACKEND=deepseek MODEL_NAME=openai/deepseek-v4-flash $0 run 20 30
   LLM_BACKEND=ds MODEL_NAME=openai/deepseek-v4-flash $0 run 20 30
+
+Process2 example:
+  REMOTE_PROJECT=/root/CodeAgent2/files2 \\
+  RUN_PREFIX=retrieval_server_p2 \\
+  LOCAL_RESULT_ROOT="\$HOME/results/process2" \\
+  LLM_BACKEND=deepseek \\
+  API_BASE=https://api.deepseek.com \\
+  MODEL_NAME=openai/deepseek-v4-flash \\
+  $0 run 20 50
 
 Env overrides:
   SERVER=root@8.136.135.101
@@ -77,6 +129,7 @@ Env overrides:
   LOCAL_RESULT_ROOT=~/save/server_results
   RUN_PREFIX=retrieval_server
   CHUNK_SIZE=10
+  FORCE=1
   LLM_BACKEND=uni|deepseek|ds
   MODEL_NAME=openai/deepseek-v4-flash
   API_BASE=https://api.deepseek.com
@@ -164,9 +217,25 @@ local_cache_dir() {
   echo "${LOCAL_SAVE_ROOT}/cache/slice_${s}"
 }
 
+local_result_dir() {
+  local start="$1"
+  local end="$2"
+  local s
+  s="$(slice_name "$start" "$end")"
+  echo "${LOCAL_RESULT_ROOT}/slice_${s}"
+}
+
 is_dir_empty() {
   local d="$1"
   [[ -d "$d" ]] && [[ -z "$(find "$d" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]
+}
+
+ssh_remote() {
+  ssh ${SSH_OPTS} "$SERVER" "$@"
+}
+
+remote_quote() {
+  printf "%q" "$1"
 }
 
 ensure_local_dirs_for_submit() {
@@ -189,8 +258,175 @@ ensure_local_dirs_for_submit() {
   fi
 }
 
-ssh_remote() {
-  ssh ${SSH_OPTS} "$SERVER" "$@"
+clean_remote_dir_contents() {
+  local remote_dir="$1"
+  local qdir
+  qdir="$(remote_quote "$remote_dir")"
+
+  ssh_remote "bash -lc '
+    set -e
+    dir=${qdir}
+    if [[ -z \"\$dir\" || \"\$dir\" == \"/\" ]]; then
+      echo \"ERROR: dangerous remote dir: \$dir\"
+      exit 1
+    fi
+    mkdir -p \"\$dir\"
+    find \"\$dir\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+  '"
+}
+
+clean_remote_old_result_only() {
+  local start="$1"
+  local end="$2"
+  local out_name run_id q_project
+  out_name="$(remote_out_name "$start" "$end")"
+  run_id="$(remote_run_id "$start" "$end")"
+  q_project="$(remote_quote "$REMOTE_PROJECT")"
+
+  echo "==> FORCE cleanup remote old result for ${out_name}"
+  ssh_remote "bash -lc '
+    set +e
+    REMOTE_PROJECT=${q_project}
+    OUT_NAME=${out_name}
+    RUN_ID=${run_id}
+
+    [[ -z \"\$REMOTE_PROJECT\" || \"\$REMOTE_PROJECT\" == \"/\" ]] && exit 1
+
+    rm -rf -- \"\$REMOTE_PROJECT/results/\$OUT_NAME\"
+    rm -f  -- \"\$REMOTE_PROJECT/_server_runs/run_\$OUT_NAME.sh\"
+
+    if [[ -d \"\$REMOTE_PROJECT/logs/run_evaluation\" ]]; then
+      find \"\$REMOTE_PROJECT/logs/run_evaluation\" -path \"*\$RUN_ID*\" -print -exec rm -rf -- {} + 2>/dev/null || true
+    fi
+  '"
+}
+
+handle_existing_local_result_before_run() {
+  local start="$1"
+  local end="$2"
+  local local_dst
+  local_dst="$(local_result_dir "$start" "$end")"
+
+  if [[ -e "$local_dst" ]]; then
+    if [[ "$FORCE" == "1" ]]; then
+      echo "==> FORCE=1: removing existing local result dir: $local_dst"
+      rm -rf -- "$local_dst"
+      clean_remote_old_result_only "$start" "$end"
+    else
+      echo "ERROR: local result dir already exists:"
+      echo "  $local_dst"
+      echo
+      echo "Refuse to run to avoid mixing old and new results."
+      echo "Choose one:"
+      echo "  1) Inspect/backup it, then remove it manually."
+      echo "  2) Run abort-clean for this slice:"
+      echo "       $0 abort-clean $start $end"
+      echo "  3) Overwrite intentionally:"
+      echo "       FORCE=1 $0 run $start $end"
+      echo
+      echo "Note: FORCE=1 deletes local result and remote old result, but keeps local cache."
+      exit 1
+    fi
+  fi
+}
+
+kill_remote_job_for_slice() {
+  local start="$1"
+  local end="$2"
+  local out_name q_project q_out
+  out_name="$(remote_out_name "$start" "$end")"
+  q_project="$(remote_quote "$REMOTE_PROJECT")"
+  q_out="$(remote_quote "$out_name")"
+
+  ssh_remote "bash -lc '
+    set +e
+
+    REMOTE_PROJECT=${q_project}
+    OUT_NAME=${q_out}
+
+    echo \"==> Stop remote process: \$OUT_NAME\"
+
+    PID_FILE=\"\$REMOTE_PROJECT/results/\$OUT_NAME/server.pid\"
+    if [[ -f \"\$PID_FILE\" ]]; then
+      PID=\$(cat \"\$PID_FILE\")
+      echo \"pid=\$PID\"
+      kill \"\$PID\" 2>/dev/null || true
+      sleep 3
+      kill -9 \"\$PID\" 2>/dev/null || true
+    else
+      echo \"no pid file\"
+    fi
+
+    echo \"==> Kill matching batch/analyse processes for \$OUT_NAME\"
+    ps -eo pid=,cmd= \
+      | grep -F \"\$OUT_NAME\" \
+      | grep -E \"run_swebench_batch|run_and_analyse|_server_runs/run_\" \
+      | grep -v grep \
+      | awk \"{print \\\$1}\" \
+      | xargs -r kill -9
+
+    echo \"==> Remove minisweagent containers mounted from \$REMOTE_PROJECT/repos\"
+    REPOS_DIR=\"\$REMOTE_PROJECT/repos\"
+    for c in \$(docker ps --format \"{{.Names}}\" | grep \"^minisweagent-\" || true); do
+      docker inspect \"\$c\" --format \"{{range .Mounts}}{{println .Source}}{{end}}\" 2>/dev/null \
+        | awk -v repos=\"\$REPOS_DIR\" '\''$0 == repos || index($0, repos "/") == 1 {found=1} END{exit !found}'\''
+      if [[ \$? -eq 0 ]]; then
+        docker rm -f \"\$c\" || true
+      fi
+    done
+  '"
+}
+
+abort_clean() {
+  local start="$1"
+  local end="$2"
+  validate_single_slice "$start" "$end"
+
+  local out_name run_id local_dst q_project q_out q_run
+  out_name="$(remote_out_name "$start" "$end")"
+  run_id="$(remote_run_id "$start" "$end")"
+  local_dst="$(local_result_dir "$start" "$end")"
+  q_project="$(remote_quote "$REMOTE_PROJECT")"
+  q_out="$(remote_quote "$out_name")"
+  q_run="$(remote_quote "$run_id")"
+
+  echo "==> abort-clean for ${out_name}"
+  echo "REMOTE_PROJECT=${REMOTE_PROJECT}"
+  echo "RUN_PREFIX=${RUN_PREFIX}"
+  echo "LOCAL_RESULT_ROOT=${LOCAL_RESULT_ROOT}"
+  echo "Local result to remove: ${local_dst}"
+  echo "Local cache will be kept: $(local_cache_dir "$start" "$end")"
+
+  kill_remote_job_for_slice "$start" "$end"
+
+  echo "==> Clean remote repos/cache/result/run script for ${out_name}"
+  ssh_remote "bash -lc '
+    set +e
+    REMOTE_PROJECT=${q_project}
+    OUT_NAME=${q_out}
+    RUN_ID=${q_run}
+
+    [[ -z \"\$REMOTE_PROJECT\" || \"\$REMOTE_PROJECT\" == \"/\" ]] && exit 1
+
+    mkdir -p \"\$REMOTE_PROJECT/repos\" \"\$REMOTE_PROJECT/cache\" \"\$REMOTE_PROJECT/results\" \"\$REMOTE_PROJECT/_server_runs\"
+
+    find \"\$REMOTE_PROJECT/repos\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    find \"\$REMOTE_PROJECT/cache\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+
+    rm -rf -- \"\$REMOTE_PROJECT/results/\$OUT_NAME\"
+    rm -f  -- \"\$REMOTE_PROJECT/_server_runs/run_\$OUT_NAME.sh\"
+
+    if [[ -d \"\$REMOTE_PROJECT/logs/run_evaluation\" ]]; then
+      find \"\$REMOTE_PROJECT/logs/run_evaluation\" -path \"*\$RUN_ID*\" -print -exec rm -rf -- {} + 2>/dev/null || true
+    fi
+
+    echo \"remote abort-clean done\"
+  '"
+
+  echo "==> Clean local result only; keep local cache"
+  rm -rf -- "$local_dst"
+
+  echo "==> abort-clean done for ${out_name}"
 }
 
 submit_job() {
@@ -203,18 +439,25 @@ submit_job() {
   out_name="$(remote_out_name "$start" "$end")"
   run_id="$(remote_run_id "$start" "$end")"
 
-  local repo_src cache_src
+  local repo_src cache_src q_project
   repo_src="$(local_repo_dir "$start" "$end")/"
   cache_src="$(local_cache_dir "$start" "$end")/"
+  q_project="$(remote_quote "$REMOTE_PROJECT")"
 
   ensure_local_dirs_for_submit "$start" "$end"
+  handle_existing_local_result_before_run "$start" "$end"
 
   echo "==> Preparing remote directories"
   ssh_remote "bash -lc '
     set -e
-    mkdir -p ${REMOTE_PROJECT}/repos ${REMOTE_PROJECT}/cache ${REMOTE_PROJECT}/results ${REMOTE_PROJECT}/_server_runs
+    REMOTE_PROJECT=${q_project}
+    [[ -z \"\$REMOTE_PROJECT\" || \"\$REMOTE_PROJECT\" == \"/\" ]] && exit 1
+
+    mkdir -p \"\$REMOTE_PROJECT/repos\" \"\$REMOTE_PROJECT/cache\" \"\$REMOTE_PROJECT/results\" \"\$REMOTE_PROJECT/_server_runs\"
     git config --global --add safe.directory \"*\" 2>/dev/null || true
-    rm -rf ${REMOTE_PROJECT}/repos/* ${REMOTE_PROJECT}/cache/*
+
+    find \"\$REMOTE_PROJECT/repos\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    find \"\$REMOTE_PROJECT/cache\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
   '"
 
   echo "==> Uploading repos: $repo_src -> ${SERVER}:${REMOTE_PROJECT}/repos/"
@@ -254,27 +497,20 @@ set -euo pipefail
 
 cd "__REMOTE_PROJECT__"
 
-# Load user shell settings first.
-# Important: /root/.bashrc may auto-activate conda base or rewrite PATH.
-# Therefore we source it BEFORE activating the target sweagent environment.
 if [[ -f /root/.bashrc ]]; then
   set +u
   source /root/.bashrc || true
   set -u
 fi
 
-# Load CodeAgent-specific environment variables.
-# Do not rely on .bashrc tail because .bashrc may return early in non-interactive shells.
 if [[ -f /root/codeagent_env.sh ]]; then
   source /root/codeagent_env.sh
 fi
 
-# Activate the target runtime environment last so it cannot be overwritten by .bashrc.
 source /root/miniforge3/etc/profile.d/conda.sh
 conda activate sweagent
 hash -r
 
-# Load project env again after conda activation so project variables win.
 if [[ -f /root/codeagent_env.sh ]]; then
   source /root/codeagent_env.sh
 fi
@@ -420,14 +656,18 @@ status_job() {
   local end="$2"
   validate_single_slice "$start" "$end"
 
-  local out_name
+  local out_name q_project q_out
   out_name="$(remote_out_name "$start" "$end")"
+  q_project="$(remote_quote "$REMOTE_PROJECT")"
+  q_out="$(remote_quote "$out_name")"
 
   ssh_remote "bash -lc '
-    PID_FILE=${REMOTE_PROJECT}/results/${out_name}/server.pid
-    LOG=${REMOTE_PROJECT}/results/${out_name}/server_nohup.log
+    REMOTE_PROJECT=${q_project}
+    OUT_NAME=${q_out}
+    PID_FILE=\"\$REMOTE_PROJECT/results/\$OUT_NAME/server.pid\"
+    LOG=\"\$REMOTE_PROJECT/results/\$OUT_NAME/server_nohup.log\"
 
-    echo \"out_name: ${out_name}\"
+    echo \"out_name: \$OUT_NAME\"
     echo \"pid_file: \$PID_FILE\"
     echo \"log: \$LOG\"
 
@@ -455,11 +695,15 @@ status_job() {
 pid_status_one_slice() {
   local start="$1"
   local end="$2"
-  local out_name
+  local out_name q_project q_out
   out_name="$(remote_out_name "$start" "$end")"
+  q_project="$(remote_quote "$REMOTE_PROJECT")"
+  q_out="$(remote_quote "$out_name")"
 
   ssh_remote "bash -lc '
-    PID_FILE=${REMOTE_PROJECT}/results/${out_name}/server.pid
+    REMOTE_PROJECT=${q_project}
+    OUT_NAME=${q_out}
+    PID_FILE=\"\$REMOTE_PROJECT/results/\$OUT_NAME/server.pid\"
     if [[ ! -f \"\$PID_FILE\" ]]; then
       echo NO_PID
     else
@@ -478,12 +722,12 @@ tail_job() {
   local end="$2"
   validate_single_slice "$start" "$end"
 
-  local out_name
+  local out_name remote_log q_log
   out_name="$(remote_out_name "$start" "$end")"
+  remote_log="${REMOTE_PROJECT}/results/${out_name}/server_nohup.log"
+  q_log="$(remote_quote "$remote_log")"
 
-  ssh_remote "bash -lc '
-    tail -f ${REMOTE_PROJECT}/results/${out_name}/server_nohup.log
-  '"
+  ssh -t ${SSH_OPTS} "$SERVER" "bash -lc 'exec tail -f ${q_log}'"
 }
 
 fetch_results() {
@@ -494,7 +738,7 @@ fetch_results() {
   local s out_name local_dst
   s="$(slice_name "$start" "$end")"
   out_name="$(remote_out_name "$start" "$end")"
-  local_dst="${LOCAL_RESULT_ROOT}/slice_${s}"
+  local_dst="$(local_result_dir "$start" "$end")"
 
   mkdir -p "${local_dst}/results" "${local_dst}/logs"
 
@@ -547,20 +791,36 @@ fetch_remote_cache_to_local_if_needed() {
 cleanup_remote_no_prompt() {
   local start="$1"
   local end="$2"
-  local out_name run_id
+  local out_name run_id q_project q_out q_run
   out_name="$(remote_out_name "$start" "$end")"
   run_id="$(remote_run_id "$start" "$end")"
+  q_project="$(remote_quote "$REMOTE_PROJECT")"
+  q_out="$(remote_quote "$out_name")"
+  q_run="$(remote_quote "$run_id")"
 
   echo "==> Auto cleanup remote data for ${out_name}"
   ssh_remote "bash -lc '
-    set -e
-    docker ps --format \"{{.Names}}\" | grep \"^minisweagent-\" | xargs -r docker rm -f || true
-    rm -rf ${REMOTE_PROJECT}/repos/*
-    rm -rf ${REMOTE_PROJECT}/cache/*
-    rm -rf ${REMOTE_PROJECT}/_server_runs/run_${out_name}.sh
+    set +e
+    REMOTE_PROJECT=${q_project}
+    OUT_NAME=${q_out}
+    RUN_ID=${q_run}
 
-    if [[ -d ${REMOTE_PROJECT}/logs/run_evaluation ]]; then
-      find ${REMOTE_PROJECT}/logs/run_evaluation -path \"*${run_id}*\" -print -exec rm -rf {} + 2>/dev/null || true
+    REPOS_DIR=\"\$REMOTE_PROJECT/repos\"
+    for c in \$(docker ps --format \"{{.Names}}\" | grep \"^minisweagent-\" || true); do
+      docker inspect \"\$c\" --format \"{{range .Mounts}}{{println .Source}}{{end}}\" 2>/dev/null \
+        | awk -v repos=\"\$REPOS_DIR\" '\''$0 == repos || index($0, repos "/") == 1 {found=1} END{exit !found}'\''
+      if [[ \$? -eq 0 ]]; then
+        docker rm -f \"\$c\" || true
+      fi
+    done
+
+    mkdir -p \"\$REMOTE_PROJECT/repos\" \"\$REMOTE_PROJECT/cache\" \"\$REMOTE_PROJECT/_server_runs\"
+    find \"\$REMOTE_PROJECT/repos\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    find \"\$REMOTE_PROJECT/cache\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    rm -f -- \"\$REMOTE_PROJECT/_server_runs/run_\$OUT_NAME.sh\"
+
+    if [[ -d \"\$REMOTE_PROJECT/logs/run_evaluation\" ]]; then
+      find \"\$REMOTE_PROJECT/logs/run_evaluation\" -path \"*\$RUN_ID*\" -print -exec rm -rf -- {} + 2>/dev/null || true
     fi
 
     echo \"remote auto cleanup done\"
@@ -572,9 +832,12 @@ cleanup_remote() {
   local end="$2"
   validate_single_slice "$start" "$end"
 
-  local out_name run_id
+  local out_name run_id q_project q_out q_run
   out_name="$(remote_out_name "$start" "$end")"
   run_id="$(remote_run_id "$start" "$end")"
+  q_project="$(remote_quote "$REMOTE_PROJECT")"
+  q_out="$(remote_quote "$out_name")"
+  q_run="$(remote_quote "$run_id")"
 
   echo "About to clean remote data for ${out_name}"
   echo "This removes:"
@@ -583,6 +846,8 @@ cleanup_remote() {
   echo "  ${REMOTE_PROJECT}/results/${out_name}"
   echo "  ${REMOTE_PROJECT}/_server_runs/run_${out_name}.sh"
   echo "  matching harness logs containing run_id: ${run_id}"
+  echo
+  echo "It does NOT remove local result or local cache."
   read -r -p "Type YES to continue: " ans
   if [[ "$ans" != "YES" ]]; then
     echo "Cancelled."
@@ -590,15 +855,28 @@ cleanup_remote() {
   fi
 
   ssh_remote "bash -lc '
-    set -e
-    docker ps --format \"{{.Names}}\" | grep \"^minisweagent-\" | xargs -r docker rm -f || true
-    rm -rf ${REMOTE_PROJECT}/repos/*
-    rm -rf ${REMOTE_PROJECT}/cache/*
-    rm -rf ${REMOTE_PROJECT}/results/${out_name}
-    rm -f ${REMOTE_PROJECT}/_server_runs/run_${out_name}.sh
+    set +e
+    REMOTE_PROJECT=${q_project}
+    OUT_NAME=${q_out}
+    RUN_ID=${q_run}
 
-    if [[ -d ${REMOTE_PROJECT}/logs/run_evaluation ]]; then
-      find ${REMOTE_PROJECT}/logs/run_evaluation -path \"*${run_id}*\" -print -exec rm -rf {} + 2>/dev/null || true
+    REPOS_DIR=\"\$REMOTE_PROJECT/repos\"
+    for c in \$(docker ps --format \"{{.Names}}\" | grep \"^minisweagent-\" || true); do
+      docker inspect \"\$c\" --format \"{{range .Mounts}}{{println .Source}}{{end}}\" 2>/dev/null \
+        | awk -v repos=\"\$REPOS_DIR\" '\''$0 == repos || index($0, repos "/") == 1 {found=1} END{exit !found}'\''
+      if [[ \$? -eq 0 ]]; then
+        docker rm -f \"\$c\" || true
+      fi
+    done
+
+    mkdir -p \"\$REMOTE_PROJECT/repos\" \"\$REMOTE_PROJECT/cache\" \"\$REMOTE_PROJECT/results\" \"\$REMOTE_PROJECT/_server_runs\"
+    find \"\$REMOTE_PROJECT/repos\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    find \"\$REMOTE_PROJECT/cache\" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    rm -rf -- \"\$REMOTE_PROJECT/results/\$OUT_NAME\"
+    rm -f  -- \"\$REMOTE_PROJECT/_server_runs/run_\$OUT_NAME.sh\"
+
+    if [[ -d \"\$REMOTE_PROJECT/logs/run_evaluation\" ]]; then
+      find \"\$REMOTE_PROJECT/logs/run_evaluation\" -path \"*\$RUN_ID*\" -print -exec rm -rf -- {} + 2>/dev/null || true
     fi
 
     echo \"remote cleanup done\"
@@ -665,6 +943,8 @@ run_range_sequential() {
   echo "==> LLM_BACKEND=${LLM_BACKEND}"
   echo "==> MODEL_NAME=${MODEL_NAME}"
   echo "==> API_BASE=${API_BASE:-<backend-default>}"
+  echo "==> LOCAL_RESULT_ROOT=${LOCAL_RESULT_ROOT}"
+  echo "==> FORCE=${FORCE}"
 
   local cur next
   cur="$start"
@@ -710,6 +990,10 @@ main() {
     cleanup)
       need_args "$@"
       cleanup_remote "$1" "$2"
+      ;;
+    abort-clean)
+      need_args "$@"
+      abort_clean "$1" "$2"
       ;;
     run)
       need_args "$@"
