@@ -4,30 +4,39 @@ prepare_repos.py — 提前下载 SWE-bench instances 对应的 Git 仓库
 用途：
   只提前准备 repos_dir/instance_id 目录，不构建代码图，不生成 embedding cache。
 
-设计：
-  - 每个 instance 一个独立仓库目录：repos_dir / instance_id
-  - 如果目录不存在：git clone + checkout base_commit + clean
-  - 如果目录已存在且是 Git 仓库：checkout base_commit + clean
-  - 如果目录存在但不是 Git 仓库：默认报错；可用 --delete_invalid_repo 删除后重 clone
-  - 不修改 run_swebench_batch.py
+新增设计：
+  - 支持把一个较大的 slice 自动拆成多个小 slice，例如 50:80 -> 50:60, 60:70, 70:80
+  - 每个小 slice 下载到项目目录下的 repos_dir
+  - 下载完成后移动到 archive_root/slice_START_END
+  - 如果目标 slice_START_END 目录已存在且非空，则跳过该小 slice
+  - 每个小 slice 结束后都会清空项目目录下的 repos_dir，避免不同 slice 混在一起
+
+默认行为：
+  - 如果使用 --slice 且没有使用 --instance_ids_file，则默认启用分段归档模式
+  - 默认每段大小为 10
+  - 默认归档到 ~/save/repos
 
 示例：
   python mini_swe_agent_integration/prepare_repos.py \
     --subset lite \
     --split test \
-    --slice 0:30 \
+    --slice 50:80 \
     --repos_dir ./repos \
     --workers 1
 
-之后运行：
-  python mini_swe_agent_integration/run_swebench_batch.py \
-    --mode retrieval \
+等价于依次准备：
+  50:60 -> ~/save/repos/slice_50_60
+  60:70 -> ~/save/repos/slice_60_70
+  70:80 -> ~/save/repos/slice_70_80
+
+如果想保留旧行为，即只下载到 ./repos，不归档、不清空：
+  python mini_swe_agent_integration/prepare_repos.py \
     --subset lite \
     --split test \
-    --slice 0:30 \
+    --slice 50:60 \
     --repos_dir ./repos \
-    --cache_dir ./cache \
-    ...
+    --workers 1 \
+    --no_archive_slices
 """
 
 from __future__ import annotations
@@ -66,6 +75,7 @@ def parse_slice(slice_text: str, n: int) -> tuple[int, int]:
       10:20
       :50
       50:
+      0
     """
     if not slice_text:
         return 0, n
@@ -88,14 +98,9 @@ def parse_slice(slice_text: str, n: int) -> tuple[int, int]:
     return start, end
 
 
-def load_instances(
-    subset: str,
-    split: str,
-    slice_text: str = "",
-    instance_ids_file: str = "",
-) -> list[dict[str, Any]]:
+def load_all_instances(subset: str, split: str) -> list[dict[str, Any]]:
     """
-    加载 SWE-bench 数据集，并按 slice 或 instance_ids_file 过滤。
+    加载完整 SWE-bench 数据集。
     """
     from datasets import load_dataset
 
@@ -103,7 +108,18 @@ def load_instances(
 
     logger.info("加载数据集: %s split=%s", dataset_name, split)
     ds = load_dataset(dataset_name, split=split)
-    instances = list(ds)
+    return list(ds)
+
+
+def select_instances(
+    all_instances: list[dict[str, Any]],
+    slice_text: str = "",
+    instance_ids_file: str = "",
+) -> list[dict[str, Any]]:
+    """
+    从完整 instances 中按 slice 或 instance_ids_file 过滤。
+    """
+    instances = list(all_instances)
 
     if instance_ids_file:
         wanted = {
@@ -122,8 +138,31 @@ def load_instances(
 
     start, end = parse_slice(slice_text, len(instances))
     selected = instances[start:end]
-    logger.info("使用 slice %s -> [%d:%d]，共 %d 个 instance", slice_text or "全部", start, end, len(selected))
+    logger.info(
+        "使用 slice %s -> [%d:%d]，共 %d 个 instance",
+        slice_text or "全部",
+        start,
+        end,
+        len(selected),
+    )
     return selected
+
+
+def load_instances(
+    subset: str,
+    split: str,
+    slice_text: str = "",
+    instance_ids_file: str = "",
+) -> list[dict[str, Any]]:
+    """
+    兼容旧调用：加载数据集，并按 slice 或 instance_ids_file 过滤。
+    """
+    all_instances = load_all_instances(subset, split)
+    return select_instances(
+        all_instances,
+        slice_text=slice_text,
+        instance_ids_file=instance_ids_file,
+    )
 
 
 def safe_rmtree(path: str) -> None:
@@ -141,6 +180,21 @@ def safe_rmtree(path: str) -> None:
             pass
 
     shutil.rmtree(path, onerror=onerror)
+
+
+def ensure_empty_dir(path: str) -> None:
+    """
+    保证目录存在且为空。
+    """
+    safe_rmtree(path)
+    os.makedirs(path, exist_ok=True)
+
+
+def is_dir_nonempty(path: str) -> bool:
+    """
+    判断目录是否存在且非空。
+    """
+    return os.path.isdir(path) and any(os.scandir(path))
 
 
 def run_cmd(
@@ -333,17 +387,22 @@ def write_manifest(
     output_path: str,
     args: argparse.Namespace,
     results: list[dict[str, Any]],
+    *,
+    slice_text: str | None = None,
+    archive_dir: str | None = None,
 ) -> None:
     manifest = {
         "subset": args.subset,
         "split": args.split,
-        "slice": args.slice,
+        "slice": slice_text if slice_text is not None else args.slice,
         "instance_ids_file": args.instance_ids_file,
         "repos_dir": os.path.abspath(args.repos_dir),
+        "archive_dir": os.path.abspath(archive_dir) if archive_dir else "",
         "total": len(results),
         "cloned": sum(1 for r in results if r["status"] == "cloned"),
         "reused": sum(1 for r in results if r["status"] == "reused"),
         "failed": sum(1 for r in results if r["status"] == "failed"),
+        "skipped": sum(1 for r in results if r["status"] == "skipped"),
         "results": results,
     }
 
@@ -352,6 +411,360 @@ def write_manifest(
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
     logger.info("manifest 已写入: %s", output_path)
+
+
+def prepare_instances(
+    instances: list[dict[str, Any]],
+    args: argparse.Namespace,
+    *,
+    clone_timeout: int | None,
+) -> list[dict[str, Any]]:
+    """
+    准备一组 instances 到 args.repos_dir。
+    """
+    logger.info(
+        "准备 repos: count=%d repos_dir=%s workers=%d",
+        len(instances),
+        args.repos_dir,
+        args.workers,
+    )
+
+    results: list[dict[str, Any]] = []
+
+    if args.workers <= 1:
+        for inst in instances:
+            results.append(
+                prepare_one_repo(
+                    inst,
+                    args.repos_dir,
+                    delete_invalid_repo=args.delete_invalid_repo,
+                    force_reclone=args.force_reclone,
+                    max_retries=args.max_retries,
+                    retry_delay=args.retry_delay,
+                    clone_timeout=clone_timeout,
+                    no_filter_blob_none=args.no_filter_blob_none,
+                )
+            )
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+            future_to_id = {
+                executor.submit(
+                    prepare_one_repo,
+                    inst,
+                    args.repos_dir,
+                    delete_invalid_repo=args.delete_invalid_repo,
+                    force_reclone=args.force_reclone,
+                    max_retries=args.max_retries,
+                    retry_delay=args.retry_delay,
+                    clone_timeout=clone_timeout,
+                    no_filter_blob_none=args.no_filter_blob_none,
+                ): inst["instance_id"]
+                for inst in instances
+            }
+
+            for future in concurrent.futures.as_completed(future_to_id):
+                instance_id = future_to_id[future]
+                try:
+                    results.append(future.result())
+                except Exception as e:
+                    logger.exception("[%s] unexpected failure", instance_id)
+                    results.append({
+                        "instance_id": instance_id,
+                        "repo": "",
+                        "base_commit": "",
+                        "repo_path": "",
+                        "status": "failed",
+                        "error": f"{type(e).__name__}: {e}",
+                    })
+
+    results.sort(key=lambda x: x.get("instance_id", ""))
+    return results
+
+
+def move_repos_dir_contents_to_archive(repos_dir: str, archive_dir: str) -> None:
+    """
+    将 repos_dir 下的内容移动到 archive_dir。
+
+    注意：
+      - archive_dir 必须为空或不存在
+      - 不移动 repos_dir 自身，只移动其中的 instance_id 子目录和 manifest 等文件
+    """
+    repos_abs = os.path.abspath(os.path.expanduser(repos_dir))
+    archive_abs = os.path.abspath(os.path.expanduser(archive_dir))
+
+    if not os.path.isdir(repos_abs):
+        raise RuntimeError(f"repos_dir 不存在，无法归档: {repos_abs}")
+
+    if os.path.exists(archive_abs) and is_dir_nonempty(archive_abs):
+        raise RuntimeError(f"archive_dir 已存在且非空，拒绝覆盖: {archive_abs}")
+
+    os.makedirs(archive_abs, exist_ok=True)
+
+    for name in os.listdir(repos_abs):
+        src = os.path.join(repos_abs, name)
+        dst = os.path.join(archive_abs, name)
+
+        if os.path.exists(dst):
+            raise RuntimeError(f"目标路径已存在，拒绝覆盖: {dst}")
+
+        shutil.move(src, dst)
+
+    logger.info("已移动 repos 内容: %s -> %s", repos_abs, archive_abs)
+
+
+def validate_archive_not_inside_repos(repos_dir: str, archive_root: str) -> None:
+    """
+    防止把 archive_root 放在 repos_dir 里面。
+    否则清空 repos_dir 时可能误删归档。
+    """
+    repos_abs = os.path.abspath(os.path.expanduser(repos_dir))
+    archive_abs = os.path.abspath(os.path.expanduser(archive_root))
+
+    try:
+        common = os.path.commonpath([repos_abs, archive_abs])
+    except ValueError:
+        return
+
+    if common == repos_abs:
+        raise RuntimeError(
+            "archive_root 不能放在 repos_dir 里面，否则清空 repos_dir 时可能误删归档。\n"
+            f"repos_dir: {repos_abs}\n"
+            f"archive_root: {archive_abs}"
+        )
+
+
+def iter_chunks(start: int, end: int, chunk_size: int) -> list[tuple[int, int]]:
+    """
+    生成 [start:end] 内按 chunk_size 切分的小段。
+    """
+    if chunk_size <= 0:
+        raise ValueError("--chunk_size 必须大于 0")
+
+    chunks: list[tuple[int, int]] = []
+    cur = start
+    while cur < end:
+        nxt = min(cur + chunk_size, end)
+        chunks.append((cur, nxt))
+        cur = nxt
+    return chunks
+
+
+def run_archive_slices_mode(
+    args: argparse.Namespace,
+    *,
+    clone_timeout: int | None,
+) -> None:
+    """
+    分段准备并归档 repos。
+
+    例如 --slice 50:80 --chunk_size 10：
+      50:60 -> archive_root/slice_50_60
+      60:70 -> archive_root/slice_60_70
+      70:80 -> archive_root/slice_70_80
+    """
+    if args.instance_ids_file:
+        raise RuntimeError(
+            "分段归档模式不支持 --instance_ids_file。\n"
+            "如果要使用 instance_ids_file，请加 --no_archive_slices 使用旧模式。"
+        )
+
+    all_instances = load_all_instances(args.subset, args.split)
+    start, end = parse_slice(args.slice, len(all_instances))
+
+    if start == end:
+        raise RuntimeError(f"没有选中任何 instance。请检查 --slice: {args.slice}")
+
+    archive_root = os.path.abspath(os.path.expanduser(args.archive_root))
+    repos_dir = os.path.abspath(os.path.expanduser(args.repos_dir))
+
+    validate_archive_not_inside_repos(repos_dir, archive_root)
+
+    os.makedirs(archive_root, exist_ok=True)
+
+    chunks = iter_chunks(start, end, args.chunk_size)
+    logger.info(
+        "启用分段归档模式: slice=[%d:%d] chunk_size=%d archive_root=%s，共 %d 段",
+        start,
+        end,
+        args.chunk_size,
+        archive_root,
+        len(chunks),
+    )
+
+    all_chunk_results: list[dict[str, Any]] = []
+    failed_any = False
+
+    for chunk_start, chunk_end in chunks:
+        slice_text = f"{chunk_start}:{chunk_end}"
+        archive_dir = os.path.join(archive_root, f"slice_{chunk_start}_{chunk_end}")
+
+        logger.info("=" * 80)
+        logger.info("处理 slice %s -> %s", slice_text, archive_dir)
+
+        if is_dir_nonempty(archive_dir):
+            logger.info(
+                "目标目录已存在且非空，跳过本段: %s",
+                archive_dir,
+            )
+            all_chunk_results.append({
+                "slice": slice_text,
+                "archive_dir": archive_dir,
+                "status": "skipped",
+                "reason": "archive_dir exists and is non-empty",
+            })
+            continue
+
+        # 每一段开始前，确保项目目录下 repos 是空的。
+        logger.info("清空项目 repos_dir: %s", repos_dir)
+        ensure_empty_dir(repos_dir)
+
+        instances = all_instances[chunk_start:chunk_end]
+        if not instances:
+            logger.warning("slice %s 没有选中 instance，跳过", slice_text)
+            all_chunk_results.append({
+                "slice": slice_text,
+                "archive_dir": archive_dir,
+                "status": "skipped",
+                "reason": "empty slice",
+            })
+            continue
+
+        results = prepare_instances(
+            instances,
+            args,
+            clone_timeout=clone_timeout,
+        )
+
+        failed = sum(1 for r in results if r["status"] == "failed")
+
+        # 先把 manifest 写入 repos_dir，随后一起移动到 archive_dir。
+        manifest_path = os.path.join(repos_dir, "prepare_repos_manifest.json")
+        write_manifest(
+            manifest_path,
+            args,
+            results,
+            slice_text=slice_text,
+            archive_dir=archive_dir,
+        )
+
+        if failed:
+            failed_any = True
+            logger.warning(
+                "slice %s 存在失败项，不移动到归档目录。保留 repos_dir 供排查: %s",
+                slice_text,
+                repos_dir,
+            )
+            all_chunk_results.append({
+                "slice": slice_text,
+                "archive_dir": archive_dir,
+                "status": "failed",
+                "failed": failed,
+                "manifest": manifest_path,
+            })
+            break
+
+        # 如果 archive_dir 存在但为空，直接使用；如果不存在，创建。
+        if os.path.exists(archive_dir) and not os.path.isdir(archive_dir):
+            raise RuntimeError(f"archive_dir 已存在但不是目录: {archive_dir}")
+
+        if os.path.exists(archive_dir) and not is_dir_nonempty(archive_dir):
+            logger.info("目标目录已存在但为空，将使用该目录: %s", archive_dir)
+
+        move_repos_dir_contents_to_archive(repos_dir, archive_dir)
+
+        # 移动后再次清空 repos_dir，保证下一段从干净状态开始。
+        logger.info("再次清空项目 repos_dir: %s", repos_dir)
+        ensure_empty_dir(repos_dir)
+
+        cloned = sum(1 for r in results if r["status"] == "cloned")
+        reused = sum(1 for r in results if r["status"] == "reused")
+
+        all_chunk_results.append({
+            "slice": slice_text,
+            "archive_dir": archive_dir,
+            "status": "done",
+            "cloned": cloned,
+            "reused": reused,
+            "failed": failed,
+            "total": len(results),
+        })
+
+        logger.info(
+            "slice %s 完成: cloned=%d reused=%d failed=%d total=%d archive=%s",
+            slice_text,
+            cloned,
+            reused,
+            failed,
+            len(results),
+            archive_dir,
+        )
+
+    summary_path = os.path.join(
+        archive_root,
+        f"prepare_repos_archive_summary_{start}_{end}.json",
+    )
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "subset": args.subset,
+                "split": args.split,
+                "slice": f"{start}:{end}",
+                "chunk_size": args.chunk_size,
+                "repos_dir": repos_dir,
+                "archive_root": archive_root,
+                "chunks": all_chunk_results,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    logger.info("分段归档 summary 已写入: %s", summary_path)
+
+    if failed_any:
+        raise SystemExit(1)
+
+    logger.info("全部分段处理完成")
+
+
+def run_legacy_mode(
+    args: argparse.Namespace,
+    *,
+    clone_timeout: int | None,
+) -> None:
+    """
+    旧模式：只把 repos 准备到 args.repos_dir，不归档、不自动清空。
+    """
+    instances = load_instances(
+        subset=args.subset,
+        split=args.split,
+        slice_text=args.slice,
+        instance_ids_file=args.instance_ids_file,
+    )
+
+    if not instances:
+        raise RuntimeError("没有选中任何 instance。请检查 --slice 或 --instance_ids_file。")
+
+    os.makedirs(args.repos_dir, exist_ok=True)
+
+    results = prepare_instances(
+        instances,
+        args,
+        clone_timeout=clone_timeout,
+    )
+
+    manifest_path = args.manifest or os.path.join(args.repos_dir, "prepare_repos_manifest.json")
+    write_manifest(manifest_path, args, results)
+
+    cloned = sum(1 for r in results if r["status"] == "cloned")
+    reused = sum(1 for r in results if r["status"] == "reused")
+    failed = sum(1 for r in results if r["status"] == "failed")
+
+    logger.info("完成: cloned=%d reused=%d failed=%d total=%d", cloned, reused, failed, len(results))
+
+    if failed:
+        logger.warning("存在失败项，请查看 manifest: %s", manifest_path)
+        raise SystemExit(1)
 
 
 def main() -> None:
@@ -427,89 +840,47 @@ def main() -> None:
     parser.add_argument(
         "--manifest",
         default="",
-        help="manifest 输出路径。默认写到 repos_dir/prepare_repos_manifest.json。",
+        help="manifest 输出路径。旧模式默认写到 repos_dir/prepare_repos_manifest.json；分段归档模式会忽略该参数并把 manifest 写入每个归档目录。",
+    )
+
+    # 新增参数
+    parser.add_argument(
+        "--archive_root",
+        default="~/save/repos",
+        help="分段归档根目录，默认 ~/save/repos。每段会保存到 archive_root/slice_START_END。",
+    )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=10,
+        help="分段大小，默认 10。例如 --slice 50:80 会拆成 50:60、60:70、70:80。",
+    )
+    parser.add_argument(
+        "--no_archive_slices",
+        action="store_true",
+        help="关闭分段归档模式，使用旧行为：只准备到 repos_dir，不移动到 archive_root，也不自动清空 repos_dir。",
     )
 
     args = parser.parse_args()
 
-    instances = load_instances(
-        subset=args.subset,
-        split=args.split,
-        slice_text=args.slice,
-        instance_ids_file=args.instance_ids_file,
-    )
-
-    if not instances:
-        raise RuntimeError("没有选中任何 instance。请检查 --slice 或 --instance_ids_file。")
-
-    os.makedirs(args.repos_dir, exist_ok=True)
-
     clone_timeout = args.clone_timeout if args.clone_timeout and args.clone_timeout > 0 else None
 
-    logger.info("准备 repos: count=%d repos_dir=%s workers=%d", len(instances), args.repos_dir, args.workers)
+    # 默认启用新模式：
+    #   - 有 --slice
+    #   - 没有 --instance_ids_file
+    #   - 没有显式 --no_archive_slices
+    #
+    # 如果你想保留旧行为，加 --no_archive_slices。
+    use_archive_slices = (
+        bool(args.slice)
+        and not args.instance_ids_file
+        and not args.no_archive_slices
+    )
 
-    results: list[dict[str, Any]] = []
-
-    if args.workers <= 1:
-        for inst in instances:
-            results.append(
-                prepare_one_repo(
-                    inst,
-                    args.repos_dir,
-                    delete_invalid_repo=args.delete_invalid_repo,
-                    force_reclone=args.force_reclone,
-                    max_retries=args.max_retries,
-                    retry_delay=args.retry_delay,
-                    clone_timeout=clone_timeout,
-                    no_filter_blob_none=args.no_filter_blob_none,
-                )
-            )
+    if use_archive_slices:
+        run_archive_slices_mode(args, clone_timeout=clone_timeout)
     else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-            future_to_id = {
-                executor.submit(
-                    prepare_one_repo,
-                    inst,
-                    args.repos_dir,
-                    delete_invalid_repo=args.delete_invalid_repo,
-                    force_reclone=args.force_reclone,
-                    max_retries=args.max_retries,
-                    retry_delay=args.retry_delay,
-                    clone_timeout=clone_timeout,
-                    no_filter_blob_none=args.no_filter_blob_none,
-                ): inst["instance_id"]
-                for inst in instances
-            }
-
-            for future in concurrent.futures.as_completed(future_to_id):
-                instance_id = future_to_id[future]
-                try:
-                    results.append(future.result())
-                except Exception as e:
-                    logger.exception("[%s] unexpected failure", instance_id)
-                    results.append({
-                        "instance_id": instance_id,
-                        "repo": "",
-                        "base_commit": "",
-                        "repo_path": "",
-                        "status": "failed",
-                        "error": f"{type(e).__name__}: {e}",
-                    })
-
-    results.sort(key=lambda x: x.get("instance_id", ""))
-
-    manifest_path = args.manifest or os.path.join(args.repos_dir, "prepare_repos_manifest.json")
-    write_manifest(manifest_path, args, results)
-
-    cloned = sum(1 for r in results if r["status"] == "cloned")
-    reused = sum(1 for r in results if r["status"] == "reused")
-    failed = sum(1 for r in results if r["status"] == "failed")
-
-    logger.info("完成: cloned=%d reused=%d failed=%d total=%d", cloned, reused, failed, len(results))
-
-    if failed:
-        logger.warning("存在失败项，请查看 manifest: %s", manifest_path)
-        raise SystemExit(1)
+        run_legacy_mode(args, clone_timeout=clone_timeout)
 
 
 if __name__ == "__main__":

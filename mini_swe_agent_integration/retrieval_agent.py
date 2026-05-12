@@ -918,6 +918,13 @@ class RetrievalAgent(DefaultAgent):
             "call_counts": self.retrieval_call_counts,
             "total_calls": sum(self.retrieval_call_counts.values()),
         }
+        try:
+            from mini_swe_agent_integration.retrieval_tools import get_deepen_stats
+            data["info"]["deepen_stats"] = get_deepen_stats()
+        except Exception as e:
+            data["info"]["deepen_stats"] = {
+                "error": f"{type(e).__name__}: {e}"
+            }
 
         # 兼容旧字段。
         data["info"]["blocked_import_reproduction"] = {

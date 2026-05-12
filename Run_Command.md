@@ -178,6 +178,15 @@ python mini_swe_agent_integration/prepare_repos.py \
   --workers 1
 
 ### 移动repos
+repos专用：
+python mini_swe_agent_integration/prepare_repos.py \
+  --subset lite \
+  --split test \
+  --slice 70:100 \
+  --repos_dir ./repos \
+  --workers 1
+
+
 注意是repos还是cache
 cd ~/save/repos
 cd ~/save/cache
@@ -187,14 +196,14 @@ cd ~/save/repos/slice_10_20
 cd ~/save/cache/slice_10_20
 
 将repos下复制到~/save/repos/slice_{num1}_{num2}，而非移动
-rsync -a --info=progress2 /home/hangli22/CodeAgent/files/repos/ ~/save/repos/slice_10_20/
+rsync -a --info=progress2 /home/hangli22/CodeAgent/files/repos/ ~/save/repos/slice_60_70/
 rsync -a --info=progress2 /home/hangli22/CodeAgent/files/cache/ ~/save/cache/slice_10_20/
 
 反之，将~/save/repos/slice_{num1}_{num2}下复制到repos/cache，而非移动
 rsync -a --info=progress2 ~/save/repos/slice_10_20/ /home/hangli22/CodeAgent/files/repos/
 rsync -a --info=progress2 ~/save/cache/slice_20_30/ /home/hangli22/CodeAgent/files/cache/
 
-不要忘了：
+！！ 不要忘了：
 rm -rf repos
 
 将cache文件夹中的前10条复制到~/save/cache/slice_{num1}_{num2}:
@@ -275,28 +284,7 @@ PY
 
 ## ds 测试指令：(有报错)
 初始29.15元
-
-python mini_swe_agent_integration/run_swebench_batch.py \
-  --mode retrieval \
-  --model_name openai/deepseek-v4-flash \
-  --api_base https://api.deepseek.com \
-  --api_key "$DEEPSEEK_API_KEY" \
-  --subset lite \
-  --split test \
-  --slice 29:30 \
-  --output_dir ./results/retrieval_deepseek_official_test \
-  --repos_dir ./repos \
-  --cache_dir ./cache \
-  --workers 1 \
-  --step_limit 60 \
-  --use_docker \
-  --docker_image sweagent-multipy:latest \
-  --redo
-
-LiteLLM.Info: If you need to debug this error, use `litellm._turn_on_debug()'.
-
-23:26:26 [ERROR] [django__django-12113] Agent 异常: litellm.BadRequestError: OpenAIException - Authentication Fails, Your api key: ****a275 is invalid
-23:26:26 [INFO] [django__django-12113] 完成 | exit=BadRequestError steps=1 cost=$0.0000 elapsed=303s patch=False retrieval={'search_structural': 0, 'search_semantic': 0, 'search_bm25': 0, 'search_hybrid': 0, 'deepen_file': 0} env={'environment': 'docker', 'docker_image': 'sweagent-multipy:latest', 'docker_repo_path': '/workspace/repo', 'repo_root': '/workspace/repo', 'python_version': '3.11', 'python_exe': 'python3.11', 'venv_path': '/tmp/sweagent-venv', 'build_requires': []}
+去run_and_annalyse查看新指令
 
 ## 操作服务器的指令：
 连接服务器：
@@ -362,6 +350,9 @@ chmod +x ~/server_swe_batch.sh
 ~/server_swe_batch.sh tail 20 30
 Ctrl + C 不会停止服务器任务。
 
+ssh root@8.136.135.101 "cd /root/CodeAgent/files && tail -120 results/retrieval_server_20_30/running.md"
+查看running.md后面内容
+
 ## 拉回运行结果
 ~/server_swe_batch.sh fetch 20 30
 结果会保存到本地：
@@ -400,8 +391,25 @@ MODE=baseline RUN_PREFIX=baseline_server ~/server_swe_batch.sh submit 20 30
 
 
 
+## 新的控制服务器运行的脚本指令参数
+Uni 后端
 
+LLM_BACKEND=uni \
+API_BASE=https://uni-api.cstcloud.cn/v1 \
+MODEL_NAME=openai/deepseek-v4-flash \
+~/server_swe_batch.sh run 20 30
 
+需要：
 
+UNI_API_KEY
+OPENAI_API_KEY="$UNI_API_KEY"
+DeepSeek 官方后端
+LLM_BACKEND=deepseek \
+API_BASE=https://api.deepseek.com \
+MODEL_NAME=openai/deepseek-v4-flash \
+~/server_swe_batch.sh run 20 30
 
+需要：
+
+DEEPSEEK_API_KEY
 

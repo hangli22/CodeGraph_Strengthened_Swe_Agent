@@ -34,6 +34,50 @@ MAX_DEEPEN_FILES = 20
 _retrieval_call_counts: Dict[str, int] = {}
 
 
+def _new_deepen_stats() -> dict:
+    """
+    创建 per-instance deepen 统计器。
+
+    注意：
+      - retrieval_tools 是进程内缓存；
+      - run_swebench_batch.py 在每个 instance 切换时会调用 clear_retrieval_cache()；
+      - 因此这里的统计天然对应“当前 instance”。
+    """
+    return {
+        # deepen_file 工具调用次数，包含文件已 full / 不在图中 / 达到预算等返回情况。
+        "deepen_file_calls": 0,
+
+        # 真正执行 FileDeepener.deepen() 并返回成功结果的次数。
+        "successful_deepen_calls": 0,
+
+        # agent 请求过的文件。
+        "requested_files": [],
+
+        # 真正完成深化的文件，包括当前文件，以及 FileDeepener 内部额外深化的 neighbor files。
+        "deepened_files": [],
+
+        # 单次 deepen 累加计数。注意：这些可能重复计数。
+        "total_new_nodes": 0,
+        "total_updated_nodes": 0,
+        "total_touched_nodes": 0,
+
+        # 去重节点集合。最终报告时用 len(...)。
+        "unique_new_node_ids": set(),
+        "unique_updated_node_ids": set(),
+        "unique_touched_node_ids": set(),
+
+        # 其他 useful stats。
+        "total_new_edges": 0,
+        "total_call_edges": 0,
+        "total_methods_added": 0,
+        "index_update_failures": 0,
+        "last_index_update_error": "",
+    }
+
+
+_deepen_stats: dict = _new_deepen_stats()
+
+
 def _next_retrieval_step(tool_name: str) -> int:
     """
     返回当前工具调用轮次，并递增计数。
@@ -46,6 +90,115 @@ def _next_retrieval_step(tool_name: str) -> int:
     _retrieval_call_counts[tool_name] = step + 1
     return step
 
+def _append_unique_list(items: list, value: str) -> None:
+    if value and value not in items:
+        items.append(value)
+
+
+def _update_deepen_stats_from_result(
+    *,
+    requested_file: str,
+    result: Any,
+    index_update_ok: bool = True,
+    index_update_error: str = "",
+) -> None:
+    """
+    根据一次 DeepenResult 更新当前 instance 的累计 deepen 统计。
+
+    统计口径：
+      - new_nodes: 本次 FileDeepener 新创建的节点；
+      - updated_nodes: 本次 FileDeepener 补全/更新的已有节点；
+      - touched_nodes: new_node_ids ∪ updated_node_ids；
+      - unique_touched_nodes: 当前 instance 内所有 deepen 调用触达节点的去重集合。
+
+    推荐论文/日志使用 unique_touched_nodes 作为“该 instance 中总共 deepen 了多少节点”。
+    """
+    global _deepen_stats
+
+    _deepen_stats["successful_deepen_calls"] += 1
+    _append_unique_list(_deepen_stats["requested_files"], requested_file)
+
+    file_rel = str(getattr(result, "file_rel", "") or requested_file)
+    _append_unique_list(_deepen_stats["deepened_files"], file_rel)
+
+    for nf in getattr(result, "neighbor_deepened_files", []) or []:
+        _append_unique_list(_deepen_stats["deepened_files"], str(nf))
+
+    new_ids = set(getattr(result, "new_node_ids", []) or [])
+    updated_ids = set(getattr(result, "updated_node_ids", []) or [])
+    touched_ids = new_ids | updated_ids
+
+    _deepen_stats["total_new_nodes"] += len(new_ids)
+    _deepen_stats["total_updated_nodes"] += len(updated_ids)
+    _deepen_stats["total_touched_nodes"] += len(touched_ids)
+
+    _deepen_stats["unique_new_node_ids"].update(new_ids)
+    _deepen_stats["unique_updated_node_ids"].update(updated_ids)
+    _deepen_stats["unique_touched_node_ids"].update(touched_ids)
+
+    _deepen_stats["total_new_edges"] += int(getattr(result, "new_edge_count", 0) or 0)
+    _deepen_stats["total_call_edges"] += int(getattr(result, "call_edge_count", 0) or 0)
+    _deepen_stats["total_methods_added"] += int(getattr(result, "method_count", 0) or 0)
+
+    if not index_update_ok:
+        _deepen_stats["index_update_failures"] += 1
+        _deepen_stats["last_index_update_error"] = index_update_error or ""
+
+
+def get_deepen_stats() -> dict:
+    """
+    返回当前 instance 的 deepen 统计，确保可以 JSON 序列化。
+
+    关键字段：
+      - unique_touched_nodes:
+          当前 instance 内所有 deepen_file 调用中，新增或更新过的节点去重数量。
+          推荐作为“一个 instance 中总共 deepen 多少个节点”的主指标。
+      - unique_new_nodes:
+          当前 instance 内新增节点去重数量。
+      - unique_updated_nodes:
+          当前 instance 内更新节点去重数量。
+    """
+    return {
+        "deepen_file_calls": int(_deepen_stats.get("deepen_file_calls", 0) or 0),
+        "successful_deepen_calls": int(_deepen_stats.get("successful_deepen_calls", 0) or 0),
+
+        "requested_files": list(_deepen_stats.get("requested_files", []) or []),
+        "deepened_files": list(_deepen_stats.get("deepened_files", []) or []),
+
+        "total_new_nodes": int(_deepen_stats.get("total_new_nodes", 0) or 0),
+        "total_updated_nodes": int(_deepen_stats.get("total_updated_nodes", 0) or 0),
+        "total_touched_nodes": int(_deepen_stats.get("total_touched_nodes", 0) or 0),
+
+        "unique_new_nodes": len(_deepen_stats.get("unique_new_node_ids", set()) or set()),
+        "unique_updated_nodes": len(_deepen_stats.get("unique_updated_node_ids", set()) or set()),
+        "unique_touched_nodes": len(_deepen_stats.get("unique_touched_node_ids", set()) or set()),
+
+        "total_new_edges": int(_deepen_stats.get("total_new_edges", 0) or 0),
+        "total_call_edges": int(_deepen_stats.get("total_call_edges", 0) or 0),
+        "total_methods_added": int(_deepen_stats.get("total_methods_added", 0) or 0),
+
+        "index_update_failures": int(_deepen_stats.get("index_update_failures", 0) or 0),
+        "last_index_update_error": str(_deepen_stats.get("last_index_update_error", "") or ""),
+    }
+
+
+def format_deepen_stats() -> str:
+    """
+    给 agent observation 展示的简短统计文本。
+    """
+    stats = get_deepen_stats()
+    return (
+        "Instance deepen stats: "
+        f"calls={stats['deepen_file_calls']}, "
+        f"successful={stats['successful_deepen_calls']}, "
+        f"files={len(stats['deepened_files'])}, "
+        f"unique_new_nodes={stats['unique_new_nodes']}, "
+        f"unique_updated_nodes={stats['unique_updated_nodes']}, "
+        f"unique_touched_nodes={stats['unique_touched_nodes']}, "
+        f"methods_added={stats['total_methods_added']}, "
+        f"new_edges={stats['total_new_edges']}, "
+        f"call_edges={stats['total_call_edges']}"
+    )
 
 def _get_cache_dir() -> str:
     return os.environ.get("CODE_GRAPH_CACHE_DIR", "/tmp/code_graph_cache")
@@ -58,11 +211,17 @@ def clear_retrieval_cache() -> None:
     必须在切换 SWE-bench instance / repo / CODE_GRAPH_CACHE_DIR 后调用。
     否则 _cache 中可能仍然保存上一个 instance 的 graph、semantic retriever、
     structural retriever，导致新 instance 使用旧代码图。
+
+    同时清空 per-instance deepen 统计，确保每个 instance 独立计数。
     """
+    global _deepen_stats
+
     n = len(_cache)
     _cache.clear()
     _retrieval_call_counts.clear()
-    logger.info("已清空 retrieval_tools 进程内缓存：%d 项", n)
+    _deepen_stats = _new_deepen_stats()
+
+    logger.info("已清空 retrieval_tools 进程内缓存：%d 项，并重置 deepen 统计", n)
 
 
 def _load_cached(key: str, loader):
@@ -117,6 +276,11 @@ def _load_structural_retriever():
 
     因此这里不再加载 feature_matrix.npy / feature_node_ids.json，
     也不再使用 FeatureExtractor / NearestNeighbors。
+
+    注意：
+      这里不能更新 deepen_file_calls。
+      _load_structural_retriever() 可能被 search_hybrid/search_structural 触发，
+      它不是 deepen_file 工具调用。
     """
     import sys
 
@@ -127,7 +291,6 @@ def _load_structural_retriever():
     graph = _load_cached("graph", _load_graph)
     retriever = StructuralRetriever(graph).build()
     return retriever
-
 
 def _load_semantic_retriever():
     import sys
@@ -674,6 +837,9 @@ def deepen_file(
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+    global _deepen_stats
+    _deepen_stats["deepen_file_calls"] += 1
+
     graph = _load_cached("graph", _load_graph)
 
     # semantic retriever 需要提前加载：
@@ -690,18 +856,60 @@ def deepen_file(
     if "::" in file_rel:
         file_rel = file_rel.split("::")[0]
 
+    # 记录 agent 请求过的文件。
+    # 注意：即使该文件已 full、不在图中、或达到预算，也应记录 requested_files。
+    _append_unique_list(_deepen_stats["requested_files"], file_rel)
+
     # 前置检查
     depth = graph.get_file_depth(file_rel)
     if depth == "full":
-        return f"[deepen_file] 文件 {file_rel} 已是完整解析状态，无需深化。"
+        stats = get_deepen_stats()
+        return (
+            f"[deepen_file] 文件 {file_rel} 已是完整解析状态，无需深化。\n"
+            "本 instance 累计深化统计: "
+            f"deepen_file_calls={stats['deepen_file_calls']}, "
+            f"successful={stats['successful_deepen_calls']}, "
+            f"deepened_files={len(stats['deepened_files'])}, "
+            f"unique_new_nodes={stats['unique_new_nodes']}, "
+            f"unique_updated_nodes={stats['unique_updated_nodes']}, "
+            f"unique_touched_nodes={stats['unique_touched_nodes']}, "
+            f"total_methods_added={stats['total_methods_added']}, "
+            f"total_new_edges={stats['total_new_edges']}, "
+            f"total_call_edges={stats['total_call_edges']}"
+        )
+
     if depth == "":
-        return f"[deepen_file] 文件 {file_rel} 不在代码图中。请检查路径。"
+        stats = get_deepen_stats()
+        return (
+            f"[deepen_file] 文件 {file_rel} 不在代码图中。请检查路径。\n"
+            "本 instance 累计深化统计: "
+            f"deepen_file_calls={stats['deepen_file_calls']}, "
+            f"successful={stats['successful_deepen_calls']}, "
+            f"deepened_files={len(stats['deepened_files'])}, "
+            f"unique_new_nodes={stats['unique_new_nodes']}, "
+            f"unique_updated_nodes={stats['unique_updated_nodes']}, "
+            f"unique_touched_nodes={stats['unique_touched_nodes']}, "
+            f"total_methods_added={stats['total_methods_added']}, "
+            f"total_new_edges={stats['total_new_edges']}, "
+            f"total_call_edges={stats['total_call_edges']}"
+        )
 
     deepened = graph.get_deepened_files()
     if len(deepened) >= MAX_DEEPEN_FILES:
+        stats = get_deepen_stats()
         return (
             f"[deepen_file] 已达到最大深化数 ({MAX_DEEPEN_FILES})，无法继续。\n"
-            f"已深化文件: {', '.join(deepened[:5])}..."
+            f"已深化文件: {', '.join(deepened[:5])}...\n"
+            "本 instance 累计深化统计: "
+            f"deepen_file_calls={stats['deepen_file_calls']}, "
+            f"successful={stats['successful_deepen_calls']}, "
+            f"deepened_files={len(stats['deepened_files'])}, "
+            f"unique_new_nodes={stats['unique_new_nodes']}, "
+            f"unique_updated_nodes={stats['unique_updated_nodes']}, "
+            f"unique_touched_nodes={stats['unique_touched_nodes']}, "
+            f"total_methods_added={stats['total_methods_added']}, "
+            f"total_new_edges={stats['total_new_edges']}, "
+            f"total_call_edges={stats['total_call_edges']}"
         )
 
     # 如果 agent 没传 issue_query，则从 issue_focus/query_focus 中自动恢复。
@@ -747,6 +955,13 @@ def deepen_file(
             exc_info=True,
         )
 
+    _update_deepen_stats_from_result(
+        requested_file=file_rel,
+        result=result,
+        index_update_ok=index_update_ok,
+        index_update_error=index_update_error,
+    )
+
     # 生成压缩版汇总：默认返回 5 个 issue-relevant methods，
     # 每个 method summary 最多 3 条 high-confidence call evidence，最多 3 个 imported/neighbor files，
     # 默认不返回 code_preview，避免大文件触发 Output too long。
@@ -774,7 +989,6 @@ def deepen_file(
 
     if result.imported_files:
         lines.append("")
-        # lines.append(f"关联文件（可进一步深化，最多 {file_hint_limit} 个）:")
         for imp_file in result.imported_files[:file_hint_limit]:
             lines.append(f"  - {imp_file}")
         if len(result.imported_files) > file_hint_limit:
@@ -826,6 +1040,20 @@ def deepen_file(
     lines.append("")
     lines.append(
         f"深化预算: 已使用 {len(graph.get_deepened_files())}/{MAX_DEEPEN_FILES}，剩余 {remaining}"
+    )
+
+    stats = get_deepen_stats()
+    lines.append(
+        "本 instance 累计深化统计: "
+        f"deepen_file_calls={stats['deepen_file_calls']}, "
+        f"successful={stats['successful_deepen_calls']}, "
+        f"deepened_files={len(stats['deepened_files'])}, "
+        f"unique_new_nodes={stats['unique_new_nodes']}, "
+        f"unique_updated_nodes={stats['unique_updated_nodes']}, "
+        f"unique_touched_nodes={stats['unique_touched_nodes']}, "
+        f"total_methods_added={stats['total_methods_added']}, "
+        f"total_new_edges={stats['total_new_edges']}, "
+        f"total_call_edges={stats['total_call_edges']}"
     )
 
     return "\n".join(lines)
