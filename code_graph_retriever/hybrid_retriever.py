@@ -85,7 +85,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from code_graph_builder.graph_schema import CodeGraph
 from .structural_retriever import StructuralRetriever, StructuralQueryMode
 from .semantic_retriever import SemanticRetriever, EmbeddingBackend
-from .bm25_retriever import BM25Retriever
+# from .bm25_retriever import BM25Retriever
 from .retrieval_result import RetrievalResult, RetrievalResponse
 
 
@@ -93,41 +93,54 @@ class HybridRetriever:
     def __init__(
         self,
         graph: CodeGraph,
-        alpha: float = 0.25,
-        beta: float = 0.55,
-        bm25_weight: float = 0.20,
+        alpha: float = 0.35,
+        beta: float = 0.65,
+        bm25_weight: float = 0.0,
         embedding_backend: Optional[EmbeddingBackend] = None,
     ):
         """
-        参数：
-          alpha:
-              structural_score 权重。
-          beta:
-              semantic_score 权重。
-          bm25_weight:
-              bm25_score 权重。BM25 更偏向召回，因此默认低于 semantic，
-              但它会参与 seed 选择和最终排序。
+        Ablation B: 禁用 BM25 + issue_focus。
+
+        当前 HybridRetriever 只融合：
+        - semantic：根据节点 embedding 匹配行为/语义描述；
+        - structural：围绕 semantic 高置信 seed 做图关系扩展。
+
+        保留 bm25_weight 参数只是为了兼容旧调用，不参与实际检索和打分。
         """
         if alpha < 0 or beta < 0 or bm25_weight < 0:
             raise ValueError("alpha / beta / bm25_weight 必须非负")
-        if alpha + beta + bm25_weight <= 0:
-            raise ValueError("alpha + beta + bm25_weight 必须大于 0")
+        if alpha + beta <= 0:
+            raise ValueError("alpha + beta 必须大于 0")
 
+        # 归一化 semantic/structural 权重，避免外部仍传 alpha/beta 时总和不是 1。
+        total = alpha + beta
         self.graph = graph
-        self.alpha = alpha
-        self.beta = beta
-        self.bm25_weight = bm25_weight
+        self.alpha = alpha / total
+        self.beta = beta / total
+
+        # Ablation B: BM25 完全禁用。保留字段仅为兼容旧代码/日志读取。
+        self.bm25_weight = 0.0
 
         self._structural = StructuralRetriever(graph)
         self._semantic = SemanticRetriever(graph, backend=embedding_backend)
-        self._bm25 = BM25Retriever(graph)
+
+        # Ablation B: 不创建 BM25Retriever。
+        # self._bm25 = BM25Retriever(graph)
 
         self._built = False
 
     def build(self) -> "HybridRetriever":
+        """
+        构建 semantic + structural 两路索引。
+
+        Ablation B: 不构建 BM25 索引。
+        """
         self._structural.build()
         self._semantic.build()
-        self._bm25.build()
+
+        # Ablation B: BM25 disabled.
+        # self._bm25.build()
+
         self._built = True
         return self
 
@@ -138,20 +151,11 @@ class HybridRetriever:
         text_changed: bool = True,
     ) -> "HybridRetriever":
         """
-        deepen 后更新三路索引。
+        deepen 后更新 semantic + structural 两路索引。
 
-        new_node_ids:
-            deepen 新增的 METHOD 节点。
-
-        updated_node_ids:
-            deepen 中已存在但文本发生变化的节点，通常包括：
-            - 当前文件的 CLASS 节点；
-            - 当前文件的顶层 FUNCTION 节点；
-            - 已存在 METHOD 被再次更新时的节点。
-
-        text_changed:
-            是否有节点文本变化。对 BM25 来说，如果已有节点文本变化，
-            最稳妥是 rebuild；如果只是新增节点，可 add_nodes。
+        Ablation B:
+        - 不更新 BM25；
+        - text_changed 参数保留，仅为兼容旧调用。
         """
         self._ensure_built()
 
@@ -161,7 +165,7 @@ class HybridRetriever:
         # 1. 结构索引：deepen 会新增 PARENT_CHILD/SIBLING/CALLS/OVERRIDES 等边，必须重建。
         self._structural.rebuild()
 
-        # 2. Semantic：方案 C，更新已有节点 + 追加新节点。
+        # 2. Semantic：更新已有节点 + 追加新节点。
         if hasattr(self._semantic, "update_after_deepen"):
             self._semantic.update_after_deepen(
                 new_node_ids=new_node_ids,
@@ -171,11 +175,11 @@ class HybridRetriever:
             # 兼容旧版本；不推荐长期使用。
             self._semantic.rebuild() if hasattr(self._semantic, "rebuild") else self._semantic.build()
 
-        # 3. BM25：当前 BM25 没有 update_nodes，已有节点变动时仍建议 rebuild。
-        if text_changed:
-            self._bm25.rebuild()
-        elif new_node_ids:
-            self._bm25.add_nodes(new_node_ids)
+        # Ablation B: BM25 disabled.
+        # if text_changed:
+        #     self._bm25.rebuild()
+        # elif new_node_ids:
+        #     self._bm25.add_nodes(new_node_ids)
 
         self._built = True
         return self
@@ -190,49 +194,36 @@ class HybridRetriever:
         structural_seed_k: int = 3,
     ) -> RetrievalResponse:
         """
-        混合检索：
-          1. semantic search 拿一批候选
-          2. BM25 多路 search 拿一批候选
-          3. 合并 semantic + BM25 候选
-          4. 从综合候选里选 top 1~3 个作为 structural expansion seed
-          5. structural search_by_node_id(seed)
-          6. merge 三路结果
+        Ablation B 混合检索：
+
+        1. semantic search 拿一批候选；
+        2. 从 semantic 候选中选 top seed；
+        3. structural search_by_node_id(seed) 做图关系扩展；
+        4. merge semantic + structural。
+
+        注意：
+        bm25_queries / bm25_query_groups / bm25_group_weights 参数保留，
+        只是为了兼容旧调用；本函数不会使用它们。
         """
         self._ensure_built()
         t0 = time.perf_counter()
         candidate_k = max(top_k * 3, top_k)
 
-        # 1. 语义检索：找到内容相关候选
+        # 1. 语义检索
         sem_resp = self._semantic.search(query, top_k=candidate_k)
         sem_results = sem_resp.results
 
-        # 2. BM25 检索：默认使用 current query；如果 retrieval_tools 传入
-        # issue_focus 组装后的 bm25_queries，则进行多路召回。
+        # Ablation B: BM25 disabled.
         bm25_results: List[RetrievalResult] = []
-        lexical_queries = _dedup_clean(list(bm25_queries or []))
-        if not lexical_queries and query.strip():
-            lexical_queries = [query.strip()]
 
-        if lexical_queries:
-            if len(lexical_queries) == 1 and not bm25_query_groups:
-                bm25_resp = self._bm25.search(lexical_queries[0], top_k=max(candidate_k * 2, 20))
-            else:
-                bm25_resp = self._bm25.search_many(
-                    lexical_queries,
-                    top_k=max(candidate_k * 2, 20),
-                    per_query_k=max(candidate_k * 2, 20),
-                    query_groups=bm25_query_groups,
-                    group_weights=bm25_group_weights,
-                )
-            bm25_results = bm25_resp.results
-
-        # 3-5. 从 semantic + BM25 综合候选中选 seed，并做结构扩展
+        # 2. 只从 semantic 候选中选择 structural expansion seed。
         seed_ids = self._select_structural_seeds(
             sem_results=sem_results,
-            bm25_results=bm25_results,
+            bm25_results=[],
             seed_k=max(1, structural_seed_k),
         )
 
+        # 3. 结构扩展
         struct_results: List[RetrievalResult] = []
         seen_struct = set()
         if self.alpha > 0:
@@ -248,7 +239,7 @@ class HybridRetriever:
                     seen_struct.add(r.node_id)
                     struct_results.append(r)
 
-        # 6. 三路融合
+        # 4. 融合 semantic + structural。
         merged = self._merge(
             struct_results=struct_results,
             sem_results=sem_results,
@@ -314,8 +305,12 @@ class HybridRetriever:
         mode: StructuralQueryMode = StructuralQueryMode.RELATED,
     ) -> RetrievalResponse:
         """
-        以节点为起点的混合检索。
-        结构侧使用指定查询模式，语义/BM25 侧使用节点的骨架有效文本。
+        以节点为起点的 semantic + structural 检索。
+
+        Ablation B:
+        - 结构侧使用指定查询模式；
+        - 语义侧使用节点的骨架有效文本；
+        - 不再使用 BM25。
         """
         self._ensure_built()
         t0 = time.perf_counter()
@@ -328,7 +323,7 @@ class HybridRetriever:
         struct_resp = self._structural.search(node_id, mode=mode, top_k=candidate_k)
         struct_results = [r for r in struct_resp.results if r.node_id != node_id]
 
-        # 2. 用骨架有效文本构造 semantic/BM25 query
+        # 2. 用骨架有效文本构造 semantic query
         sem_query = self._node_query_text(node) if node else ""
 
         sem_resp = (
@@ -338,12 +333,8 @@ class HybridRetriever:
         )
         sem_results = [r for r in sem_resp.results if r.node_id != node_id]
 
-        bm25_resp = (
-            self._bm25.search(sem_query, top_k=candidate_k)
-            if sem_query
-            else RetrievalResponse(query=query_text)
-        )
-        bm25_results = [r for r in bm25_resp.results if r.node_id != node_id]
+        # Ablation B: BM25 disabled.
+        bm25_results: List[RetrievalResult] = []
 
         merged = self._merge(
             struct_results=struct_results,
@@ -370,38 +361,31 @@ class HybridRetriever:
         seed_k: int = 3,
     ) -> List[str]:
         """
-        从 semantic + BM25 综合候选中选结构扩展 seed。
+        从 semantic 候选中选 structural expansion seed。
 
-        设计目标：
-          - 不再只依赖 semantic top1
-          - BM25 负责召回入口，特别是 exact symbol / file hint 命中
-          - semantic 与 BM25 重合的候选优先
+        bm25_results 参数保留只是为了兼容旧调用；Ablation B 中不会使用。
         """
         candidates: Dict[str, RetrievalResult] = {}
         preliminary_scores: Dict[str, float] = {}
 
         for rank, r in enumerate(sem_results):
             candidates.setdefault(r.node_id, r)
-            semantic_score = _get_float_attr(r, "semantic_score", fallback=getattr(r, "final_score", 0.0))
-            # 轻微 rank bonus，避免分数相同时 top 排名丢失
+            semantic_score = _get_float_attr(
+                r,
+                "semantic_score",
+                fallback=getattr(r, "final_score", 0.0),
+            )
             rank_bonus = 0.02 / (rank + 1)
-            preliminary_scores[r.node_id] = preliminary_scores.get(r.node_id, 0.0) + self.beta * semantic_score + rank_bonus
-
-        for rank, r in enumerate(bm25_results):
-            candidates.setdefault(r.node_id, r)
-            bm25_score = _get_float_attr(r, "bm25_score", fallback=getattr(r, "final_score", 0.0))
-            rank_bonus = 0.02 / (rank + 1)
-            preliminary_scores[r.node_id] = preliminary_scores.get(r.node_id, 0.0) + self.bm25_weight * bm25_score + rank_bonus
-
-            # semantic + BM25 重合的节点更适合作为结构扩展入口
-            if any(sr.node_id == r.node_id for sr in sem_results):
-                preliminary_scores[r.node_id] += 0.05
+            preliminary_scores[r.node_id] = (
+                preliminary_scores.get(r.node_id, 0.0)
+                + self.beta * semantic_score
+                + rank_bonus
+            )
 
         ranked = sorted(
             candidates.values(),
             key=lambda r: (
                 preliminary_scores.get(r.node_id, 0.0) + self._seed_type_bonus(r),
-                _get_float_attr(r, "bm25_score", 0.0),
                 _get_float_attr(r, "semantic_score", 0.0),
             ),
             reverse=True,
@@ -438,60 +422,50 @@ class HybridRetriever:
         top_k: int,
     ) -> List[RetrievalResult]:
         """
-        融合结构、语义、BM25 结果，加权计算最终分数。
+        融合结构、语义结果，加权计算最终分数。
+
+        bm25_results 参数保留只是为了兼容旧调用；Ablation B 中不会使用。
         """
         by_id: Dict[str, RetrievalResult] = {}
 
         # 结构结果
         for r in struct_results:
             by_id[r.node_id] = r
+            _safe_setattr(r, "bm25_score", 0.0)
+            _safe_setattr(r, "bm25_reason", "")
+            _safe_setattr(r, "bm25_hit_queries", [])
+            _safe_setattr(r, "bm25_query_groups", {})
 
         # 语义结果
         for r in sem_results:
             if r.node_id in by_id:
                 existing = by_id[r.node_id]
-                existing.semantic_score = _get_float_attr(r, "semantic_score", fallback=getattr(r, "final_score", 0.0))
+                existing.semantic_score = _get_float_attr(
+                    r,
+                    "semantic_score",
+                    fallback=getattr(r, "final_score", 0.0),
+                )
                 existing.semantic_reason = getattr(r, "semantic_reason", "")
             else:
-                # 确保 semantic result 至少有 structural_score/bm25_score 兜底
-                _safe_setattr(r, "bm25_score", _get_float_attr(r, "bm25_score", 0.0))
+                _safe_setattr(r, "bm25_score", 0.0)
+                _safe_setattr(r, "bm25_reason", "")
+                _safe_setattr(r, "bm25_hit_queries", [])
+                _safe_setattr(r, "bm25_query_groups", {})
                 by_id[r.node_id] = r
 
-        # BM25 结果
-        for r in bm25_results:
-            bm25_score = _get_float_attr(r, "bm25_score", fallback=getattr(r, "final_score", 0.0))
-            if r.node_id in by_id:
-                existing = by_id[r.node_id]
-                _safe_setattr(existing, "bm25_score", bm25_score)
-                _safe_setattr(existing, "bm25_reason", getattr(r, "bm25_reason", ""))
-                _safe_setattr(existing, "bm25_hit_queries", getattr(r, "bm25_hit_queries", []))
-                _safe_setattr(existing, "bm25_query_groups", getattr(r, "bm25_query_groups", {}))
-            else:
-                _safe_setattr(r, "bm25_score", bm25_score)
-                # BM25 result 自身不应伪装成 semantic result
-                r.semantic_score = _get_float_attr(r, "semantic_score", 0.0)
-                by_id[r.node_id] = r
+        # Ablation B: ignore bm25_results completely.
 
         for r in by_id.values():
             structural_score = _get_float_attr(r, "structural_score", 0.0)
             semantic_score = _get_float_attr(r, "semantic_score", 0.0)
-            bm25_score = _get_float_attr(r, "bm25_score", 0.0)
-
-            # semantic + BM25 同时命中给轻量 overlap bonus
-            overlap_bonus = 0.0
-            if semantic_score > 0 and bm25_score > 0:
-                overlap_bonus += 0.05
 
             r.final_score = (
                 self.alpha * structural_score
                 + self.beta * semantic_score
-                + self.bm25_weight * bm25_score
-                + overlap_bonus
             )
 
         ranked = sorted(by_id.values(), key=lambda x: x.final_score, reverse=True)
         return ranked[:top_k]
-
 
 # ----------------------------------------------------------------------
 # 小工具：保持与旧 RetrievalResult 兼容

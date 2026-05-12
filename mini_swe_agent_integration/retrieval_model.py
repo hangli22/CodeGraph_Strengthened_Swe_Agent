@@ -38,13 +38,15 @@ _ALLOWED_TOOLS = {"bash"} | set(TOOL_FUNCTIONS.keys())
 _TOOLCALL_FORMAT_ERROR_TEMPLATE = """\
 Format error: {{error}}
 
-You MUST include one valid tool call in your response.
-Available tools: bash, search_hybrid, search_bm25, deepen_file, search_semantic, search_structural.
+You MUST include exactly one valid tool call in your response.
+Do not include multiple tool calls.
+If you include multiple tool calls, only the first valid tool call will be executed and all later tool calls will be ignored.
+Available tools: bash, search_hybrid, deepen_file, search_semantic, search_structural.
 
 - Use `bash` for ALL shell operations: read files, edit files, run scripts, git commands, and submit.
 - Use `search_hybrid` as the default first retrieval tool.
-- Use `search_bm25` for exact symbols, file names, function/method/class names, parameters, and error messages.
 - Use `deepen_file` after retrieval identifies a promising file and you need method-level/call-graph details.
+- Use `search_semantic` for pure semantic lookup when you want to compare against hybrid results.
 - Use `search_structural` only with a known node_id from previous retrieval output.
 - Do not use markdown code blocks or plain-text shell commands.
 - Natural language content is ignored; the action must be represented by a tool call.
@@ -173,10 +175,14 @@ class RetrievalModel(LitellmModel):
         检索工具:
             {"tool_name": str, "args": dict, "tool_call_id": str}
 
-        宽松策略：
+        策略：
         - assistant content 非空但 tool_calls 合法时，不报错；
         - 一旦存在 tool_calls，就清空 response 里的 assistant content；
-        - 如果返回多个 tool_calls，只执行第一个合法 tool call，忽略后续 tool call。
+        - 如果返回多个 tool_calls，只执行第一个合法 tool call；
+        - 关键：必须同步裁剪原始 response.message.tool_calls，只保留被执行的那个。
+        否则 assistant message 中的 tool_calls 数量会多于后续 tool messages 数量，
+        下一轮 OpenAI-compatible API 会报：
+        "An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'."
         """
         msg = response.choices[0].message
         tool_calls = msg.tool_calls or []
@@ -186,7 +192,7 @@ class RetrievalModel(LitellmModel):
                 "No tool calls found. You MUST call exactly one tool per turn."
             )
 
-        # 关键：清洗原始 API response，避免 extra.response 里保留 assistant content。
+        # 清洗 assistant content，避免 content + tool_calls 污染 trajectory。
         self._clear_response_assistant_content(response)
 
         first_error = ""
@@ -199,9 +205,35 @@ class RetrievalModel(LitellmModel):
                     first_error = self._extract_format_error_text(e)
                 continue
 
-            # 只执行第一个合法 tool call。
+            # ------------------------------------------------------------
+            # 关键修复：
+            # 只执行第一个合法 tool call 时，必须把原始 assistant message
+            # 里的 tool_calls 也裁剪成只剩这个 tc。
+            #
+            # 否则 response 被加入对话历史后，会表现为：
+            #   assistant.tool_calls = 多个
+            #   后续 tool messages = 只有一个
+            # 这会导致下一轮 LLM 请求直接 BadRequest。
+            # ------------------------------------------------------------
+            msg.tool_calls = [tc]
+
+            # 有些 LiteLLM/OpenAI 对象同时支持 dict-like extra 字段。
+            # 为了兼容不同 response 结构，尽量同步常见位置。
+            try:
+                response.choices[0].message.tool_calls = [tc]
+            except Exception:
+                pass
+
+            try:
+                if isinstance(response, dict):
+                    response["choices"][0]["message"]["tool_calls"] = [tc]
+            except Exception:
+                pass
+
             return [action]
 
+        # 如果所有 tool_calls 都无法解析，不要裁剪。
+        # 这里抛 FormatError，让上层生成格式错误提示。
         raise self._format_error(
             first_error or "Tool calls were present, but none could be parsed as a valid action."
         )

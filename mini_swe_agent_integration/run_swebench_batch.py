@@ -400,28 +400,14 @@ def process_instance(
         os.environ["CODE_GRAPH_CACHE_DIR"] = instance_cache_dir
         os.environ["SWE_INSTANCE_ID"] = instance_id
         os.environ["SWE_ISSUE_TEXT"] = instance.get("problem_statement", "")
-        try:
-            from code_graph_retriever.issue_focus import ensure_issue_focus_for_instance
 
-            focus = ensure_issue_focus_for_instance(
-                cache_dir=instance_cache_dir,
-                instance_id=instance_id,
-                issue_text=instance["problem_statement"],
-                api_key=api_key,
-                model=llm_config["issue_focus_model"],
-                llm_backend=llm_config["llm_backend"],
-                force=False,
-            )
-
-            logger.info(
-                "[%s] issue focus 就绪: symbols=%d files=%d bm25_queries=%d",
-                instance_id,
-                len(focus.exact_symbols),
-                len(focus.file_hints),
-                len(focus.bm25_queries),
-            )
-        except Exception as e:
-            logger.warning("[%s] issue focus 抽取失败，将继续运行: %s", instance_id, e)
+        # Ablation B: disable issue_focus pre-extraction.
+        # 不调用 ensure_issue_focus_for_instance()，避免额外 LLM 调用、issue_focus.json、
+        # bm25_queries/query_focus 等因素进入实验组。
+        logger.info(
+            "[%s] Ablation B: issue_focus/BM25 disabled; skip issue focus extraction",
+            instance_id,
+        )
 
     if mode == "retrieval":
         try:

@@ -34,7 +34,7 @@ python mini_swe_agent_integration/run_swebench_batch.py \
 python -m swebench.harness.run_evaluation \
   --dataset_name princeton-nlp/SWE-bench_Lite \
   --split test \
-  --predictions_path ./results/retrieval_lihang_11/preds.json \
+  --predictions_path ./results/retrieval_ablate_no_bm25_issuefocus_0_1/preds.json \
   --max_workers 1 \
   --run_id retrieval_lihang_11_10_30
 
@@ -52,8 +52,8 @@ python - <<'PY'
 import json
 from pathlib import Path
 
-iid = "django__django-11910"
-traj = Path(f"./results/retrieval_lihang_11/{iid}/{iid}.traj.json")
+iid = "django__django-12113"
+traj = Path(f"./results/retrieval_ablate_no_bm25_issuefocus_0_1/{iid}/{iid}.traj.json")
 data = json.loads(traj.read_text(encoding="utf-8"))
 out_path = traj.parent / f"message_300_600_{iid}.md"
 CONTENT_LIMIT = 800
@@ -336,6 +336,12 @@ SSH_OPTS="-i ~/.ssh/id_ed25519"
 chmod +x ~/server_swe_batch.sh
 之后再运行:
 ## 上传 slice 并让服务器后台运行
+
+### 新版服务器执行指令：
+LLM_BACKEND=deepseek \
+MODEL_NAME=openai/deepseek-v4-flash \
+~/server_swe_batch.sh run 0 20
+
 ~/server_swe_batch.sh submit 20 30
 作用：
 上传 ~/save/repos/slice_20_30/ 到服务器 repos/
@@ -365,6 +371,9 @@ ssh root@8.136.135.101 "cd /root/CodeAgent/files && tail -120 results/retrieval_
 /root/CodeAgent/files/cache/*
 /root/CodeAgent/files/results/retrieval_server_20_30
 需要手动输入 YES 确认。
+
+直接用：
+~/server_swe_batch.sh cleanup 20 30
 
 ## 一键运行：上传、启动、等待、拉回
 ~/server_swe_batch.sh run 20 30

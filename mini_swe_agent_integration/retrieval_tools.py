@@ -356,24 +356,25 @@ def _load_semantic_retriever():
 
 
 def _load_bm25_retriever():
-    """加载 BM25 词法检索器。"""
-    import sys
+    """
+    Ablation B: BM25 已禁用。
 
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-    from code_graph_retriever.bm25_retriever import BM25Retriever
-
-    graph = _load_cached("graph", _load_graph)
-    retriever = BM25Retriever(graph).build()
-    return retriever
+    保留该函数只是为了兼容旧代码引用；正常运行中不应调用。
+    """
+    raise RuntimeError(
+        "BM25 retriever is disabled in ablation B. "
+        "Use search_hybrid/search_semantic/search_structural instead."
+    )
 
 
 def _load_hybrid_retriever():
     """
-    加载融合检索器，并复用已缓存的 structural / semantic / BM25 分支。
+    加载融合检索器，并复用已缓存的 structural / semantic 分支。
 
-    这样可以避免每次 search_hybrid 都重新构造 BM25 索引，也能保证 deepen_file
-    后更新的是同一个进程内 retriever 对象。
+    Ablation B:
+      - 不加载 BM25；
+      - 不设置 retriever._bm25；
+      - search_hybrid 实际为 semantic + structural。
     """
     import sys
 
@@ -384,114 +385,45 @@ def _load_hybrid_retriever():
     graph = _load_cached("graph", _load_graph)
     struct_retriever = _load_cached("structural_retriever", _load_structural_retriever)
     sem_retriever = _load_cached("semantic_retriever", _load_semantic_retriever)
-    bm25_retriever = _load_cached("bm25_retriever", _load_bm25_retriever)
 
     retriever = HybridRetriever(graph)
     retriever._structural = struct_retriever
     retriever._semantic = sem_retriever
-    retriever._bm25 = bm25_retriever
     retriever._built = True
     return retriever
 
 
 def _build_bm25_bundle_for_query(query: str, retrieval_step: int = 0):
     """
-    在 retrieval_tools 层读取 issue_focus，并构造 BM25 多路查询。
+    Ablation B: BM25 + issue_focus 已禁用。
 
-    设计原则：
-      - issue_focus 属于 instance/cache 级上下文，不塞进 HybridRetriever 内部。
-      - 默认启用 query_focus：每次 search_hybrid 会尝试根据当前 query 更新 query_focus。
-      - 如果 LLM 抽取失败，降级为 initial_issue_focus + current_query，不影响检索主流程。
+    保留空 bundle 只是为了兼容旧代码引用。
+    不导入 issue_focus，不发起 LLM 调用，不读取/更新 query_focus。
     """
-    import sys
+    class _DisabledBundle:
+        current_query = query
+        queries: List[str] = []
+        query_groups: Dict[str, List[str]] = {}
+        group_weights: Dict[str, float] = {}
 
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        def to_list(self):
+            return []
 
-    try:
-        from code_graph_retriever.issue_focus import (
-            IssueFocusStore,
-            make_issue_focus_backend,
-        )
-
-        backend = make_issue_focus_backend(
-            llm_backend=os.environ.get("SWE_LLM_BACKEND", "uni"),
-            api_key=os.environ.get("SWE_LLM_API_KEY", "") or None,
-            model=os.environ.get("SWE_LLM_MODEL", "") or None,
-            timeout=int(os.environ.get("SWE_LLM_TIMEOUT", "60")),
-        )
-
-        store = IssueFocusStore(
-            cache_dir=_get_cache_dir(),
-            backend=backend,
-        )
-
-        try:
-            return store.build_bm25_query_bundle(
-                current_query=query,
-                include_query_focus=True,
-                update_query_focus=True,
-                max_queries=12,
-                retrieval_step=retrieval_step,
-            )
-        except Exception as e:
-            logger.warning(
-                "query_focus 抽取/更新失败，降级为已有 issue_focus + current_query: %s",
-                e,
-            )
-            return store.build_bm25_query_bundle(
-                current_query=query,
-                include_query_focus=True,
-                update_query_focus=False,
-                max_queries=12,
-                retrieval_step=retrieval_step,
-            )
-
-    except Exception as e:
-        logger.warning("issue_focus 不可用，BM25 将仅使用当前 query: %s", e)
-
-        class _FallbackBundle:
-            current_query = query
-            queries = [query] if query and query.strip() else []
-            query_groups = {"current_query": queries}
-            group_weights = {"current_query": 1.20}
-
-            def to_list(self):
-                return self.queries
-
-        return _FallbackBundle()
+    return _DisabledBundle()
 
 def _build_deepen_issue_query(explicit_query: str = "") -> str:
     """
     为 deepen_file 构造 issue_query。
 
-    deepen_file 的 method_summary 依赖 issue_query。
-    如果 agent 没显式传 issue_query，则从 issue_focus/query_focus 中恢复。
+    Ablation B:
+      - 不读取 issue_focus；
+      - 不读取 query_focus；
+      - 不从 SWE_ISSUE_TEXT 自动补全；
+      - 只使用 agent 显式传入的 issue_query。
+
+    这样可以保证 issue_focus 完全不参与 deepen_file。
     """
-    explicit_query = (explicit_query or "").strip()
-    if explicit_query:
-        return explicit_query
-
-    import sys
-
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-    try:
-        from code_graph_retriever.issue_focus import build_deepen_issue_query_from_cache
-
-        q = build_deepen_issue_query_from_cache(
-            cache_dir=_get_cache_dir(),
-            explicit_query=explicit_query,
-        )
-        if q.strip():
-            return q.strip()
-
-    except Exception as e:
-        logger.warning(
-            "从 issue_focus 构造 deepen issue_query 失败，将不生成 issue-related method summary: %s",
-            e,
-        )
-
-    return ""
+    return (explicit_query or "").strip()
 
 
 def _format_bm25_group_summary(bundle: Any) -> str:
@@ -631,172 +563,66 @@ def search_semantic(query: str, top_k: int = 5) -> str:
 
 def search_bm25(query: str, top_k: int = 10) -> str:
     """
-    BM25 词法/符号检索入口。
+    Ablation B: BM25 检索入口已禁用。
 
-    用途：
-      - 精确匹配文件名、类名、函数名、方法名、参数名、报错词；
-      - 使用 issue_focus/query_focus 构造多路短 BM25 query；
-      - 返回 BM25 命中的节点及命中 query/group。
-
-    与 search_hybrid 的区别：
-      - search_hybrid 会融合 semantic + BM25 + structural；
-      - search_bm25 只看词法/符号命中，更适合 exact symbol / file hint / error term 召回。
+    正常情况下该函数不会被注册到 TOOL_FUNCTIONS / RETRIEVAL_TOOLS。
+    如果旧代码误调用，返回明确提示，避免触发 BM25 或 issue_focus。
     """
-    try:
-        retriever = _load_cached("bm25_retriever", _load_bm25_retriever)
-
-        retrieval_step = _next_retrieval_step("search_bm25")
-        bm25_bundle = _build_bm25_bundle_for_query(query, retrieval_step=retrieval_step)
-
-        queries = bm25_bundle.to_list()
-        query_groups = getattr(bm25_bundle, "query_groups", {}) or {}
-        group_weights = getattr(bm25_bundle, "group_weights", {}) or {}
-
-        if not queries:
-            queries = [query.strip()] if query and query.strip() else []
-
-        if not queries:
-            return (
-                "[bm25_search] query 为空，无法执行 BM25 检索。\n"
-                "请提供文件名、符号名、参数名、错误词或简短行为描述。"
-            )
-
-        if hasattr(retriever, "search_many"):
-            response = retriever.search_many(
-                queries,
-                top_k=top_k,
-                per_query_k=max(top_k * 3, 20),
-                query_groups=query_groups,
-                group_weights=group_weights,
-            )
-        else:
-            response = retriever.search(query, top_k=top_k)
-
-        if not response.results:
-            return (
-                f"[bm25_search] 未找到与 '{query}' 词法/符号相关的节点。\n"
-                f"BM25查询组: {_format_bm25_group_summary(bm25_bundle)}\n"
-                f"BM25 issue_focus 衰减步数: {retrieval_step}"
-            )
-
-        lines = [
-            f"[bm25_search] 找到 {len(response.results)} 个词法/符号相关节点",
-            f"原始查询: {query}",
-            f"实际 BM25 queries: {', '.join(queries[:8])}",
-            f"BM25查询组: {_format_bm25_group_summary(bm25_bundle)}",
-            f"BM25 issue_focus 衰减步数: {retrieval_step}",
-            f"检索范围: {response.total_nodes} 个节点  耗时: {response.elapsed_ms:.1f}ms",
-            "=" * 60,
-        ]
-
-        for i, r in enumerate(response.results, 1):
-            bm25_score = float(getattr(r, "bm25_score", getattr(r, "final_score", 0.0)) or 0.0)
-            lines += [
-                f"\n[{i}] {r.qualified_name}  [{r.node_type}]",
-                f"    节点ID: {r.node_id}",
-                f"    文件: {r.file}  行: {r.start_line}~{r.end_line}",
-                f"    BM25评分: {bm25_score:.3f}",
-            ]
-
-            bm25_reason = getattr(r, "bm25_reason", "") or ""
-            if bm25_reason:
-                lines.append(f"    BM25词法命中: {bm25_reason}")
-
-            hit_queries = getattr(r, "bm25_hit_queries", []) or []
-            if hit_queries:
-                lines.append(
-                    "    BM25命中查询: "
-                    + ", ".join(str(x) for x in hit_queries[:5])
-                )
-
-            query_group_info = getattr(r, "bm25_query_groups", {}) or {}
-            if query_group_info:
-                groups = query_group_info.get("groups", [])
-                hit_count = query_group_info.get("hit_count", "")
-                group_text = ", ".join(str(x) for x in groups[:5])
-                if group_text:
-                    lines.append(f"    BM25命中分组: {group_text}  hit_count={hit_count}")
-
-            if r.comment:
-                lines.append(f"    功能注释: {r.comment[:120]}")
-
-        return "\n".join(lines)
-
-    except Exception as e:
-        logger.exception("bm25_search 失败")
-        return f"[bm25_search ERROR] {type(e).__name__}: {e}"
+    return (
+        "[bm25_search disabled]\n"
+        "BM25 + issue_focus are disabled for ablation B.\n"
+        "Use search_hybrid, search_semantic, search_structural, or bash grep instead."
+    )
 
 def search_hybrid(query: str, top_k: int = 5) -> str:
     """
-    混合检索入口。
+    Ablation B 混合检索入口。
 
     当前流程：
-      1. semantic search 拿一批候选
-      2. retrieval_tools 读取 issue_focus，组装 BM25 多路 query
-      3. BM25 多路 search 拿一批候选
-      4. 合并 semantic + BM25 候选
-      5. 从综合候选里选 top 1~3 个作为 structural expansion seed
-      6. structural search_by_node_id(seed)
-      7. merge 三路结果
+      1. semantic search 拿一批候选；
+      2. 从 semantic 候选中选择 structural expansion seed；
+      3. structural search_by_node_id(seed)；
+      4. merge semantic + structural。
 
-    BM25 不替代 semantic，只负责增强召回；最终仍保留 semantic_score、
-    structural_score 和 bm25_score 三路分数。
+    不使用 BM25，不读取 issue_focus，不更新 query_focus。
     """
     try:
         retriever = _load_cached("hybrid_retriever", _load_hybrid_retriever)
-        retrieval_step = _next_retrieval_step("search_hybrid")
-        bm25_bundle = _build_bm25_bundle_for_query(query, retrieval_step=retrieval_step)
-        bm25_queries = bm25_bundle.to_list()
-        bm25_query_groups = getattr(bm25_bundle, "query_groups", {}) or {}
-        bm25_group_weights = getattr(bm25_bundle, "group_weights", {}) or {}
 
         response = retriever.search(
             query,
             top_k=top_k,
-            bm25_queries=bm25_queries,
-            bm25_query_groups=bm25_query_groups,
-            bm25_group_weights=bm25_group_weights,
             structural_seed_k=3,
         )
 
         if not response.results:
             return (
                 f"[hybrid_search] 未找到与 '{query}' 相关的节点。\n"
-                f"（共检索 {response.total_nodes} 个节点，耗时 {response.elapsed_ms:.1f}ms）\n"
-                f"BM25查询组: {_format_bm25_group_summary(bm25_bundle)}"
+                f"（共检索 {response.total_nodes} 个节点，耗时 {response.elapsed_ms:.1f}ms）"
             )
 
         lines = [
             f"[hybrid_search] 找到 {len(response.results)} 个相关节点",
             f"查询: {query}",
             f"检索范围: {response.total_nodes} 个节点  耗时: {response.elapsed_ms:.1f}ms",
-            "说明: semantic 负责语义候选，BM25(issue_focus+query) 负责词法召回，结构检索负责围绕高置信 seed 扩展关系节点",
-            f"BM25查询组: {_format_bm25_group_summary(bm25_bundle)}",
-            f"BM25 issue_focus 衰减步数: {retrieval_step}",
+            "模式: Ablation B，semantic + structural；BM25/issue_focus disabled",
             "=" * 60,
         ]
 
         for i, r in enumerate(response.results, 1):
-            bm25_score = float(getattr(r, "bm25_score", 0.0) or 0.0)
             lines += [
                 f"\n[{i}] {r.qualified_name}  [{r.node_type}]",
                 f"    节点ID: {r.node_id}",
                 f"    文件: {r.file}  行: {r.start_line}~{r.end_line}",
-                f"    综合评分: {r.final_score:.3f}  "
-                f"（结构: {r.structural_score:.3f} | 语义: {r.semantic_score:.3f} | BM25: {bm25_score:.3f}）",
+                f"    综合评分: {r.final_score:.3f}",
+                f"    结构评分: {r.structural_score:.3f}",
+                f"    语义评分: {r.semantic_score:.3f}",
             ]
 
             if r.structural_reason:
-                lines.append(f"    结构关系依据: {r.structural_reason}")
+                lines.append(f"    结构依据: {r.structural_reason}")
             if r.semantic_reason:
-                lines.append(f"    语义关联说明: {r.semantic_reason}")
-            bm25_reason = getattr(r, "bm25_reason", "") or ""
-            if bm25_reason:
-                lines.append(f"    BM25词法命中: {bm25_reason}")
-            bm25_hit_queries = getattr(r, "bm25_hit_queries", []) or []
-            if bm25_hit_queries:
-                hit_q = ", ".join(str(x) for x in bm25_hit_queries[:5])
-                lines.append(f"    BM25命中查询: {hit_q}")
+                lines.append(f"    语义关联: {r.semantic_reason}")
             if r.position_summary:
                 lines.append(f"    结构位置: {r.position_summary}")
             if r.comment:
@@ -818,14 +644,19 @@ def deepen_file(
     """
     按需深化文件：完整解析 AST，补充方法级节点和调用关系，更新检索索引。
 
+    Ablation B:
+      - 不使用 BM25；
+      - 不使用 issue_focus/query_focus；
+      - issue_query 只接受 agent 显式传入；
+      - 如果 issue_query 为空，则不生成 issue-related method summary。
+
     Parameters
     ----------
     file_path:
         要深化的文件相对路径。
     issue_query:
         当前 issue 或当前检索 query。可选。
-        如果为空，系统会尝试从 issue_focus/query_focus/SWE_ISSUE_TEXT 自动补全。
-        只要最终 issue_query 非空，FileDeepener 就会生成 issue-related method_summary。
+        Ablation B 中不会自动从 issue_focus/query_focus/SWE_ISSUE_TEXT 补全。
     top_methods:
         issue-related method summary 的种子方法数量。
     expand_neighbor_classes:
@@ -847,8 +678,7 @@ def deepen_file(
     # 2. HybridRetriever 内部也会复用同一个 cached semantic retriever。
     sem_ret = _load_cached("semantic_retriever", _load_semantic_retriever)
 
-    # 统一融合检索器。它内部复用 cached structural / semantic / BM25。
-    # deepen 后只通过 hybrid_ret.rebuild_after_deepen() 更新三路索引。
+    # 统一融合检索器。Ablation B 中它只复用 cached structural / semantic。
     hybrid_ret = _load_cached("hybrid_retriever", _load_hybrid_retriever)
 
     # 规范化路径
@@ -857,7 +687,6 @@ def deepen_file(
         file_rel = file_rel.split("::")[0]
 
     # 记录 agent 请求过的文件。
-    # 注意：即使该文件已 full、不在图中、或达到预算，也应记录 requested_files。
     _append_unique_list(_deepen_stats["requested_files"], file_rel)
 
     # 前置检查
@@ -912,8 +741,7 @@ def deepen_file(
             f"total_call_edges={stats['total_call_edges']}"
         )
 
-    # 如果 agent 没传 issue_query，则从 issue_focus/query_focus 中自动恢复。
-    # 否则 FileDeepener.deepen(issue_query="") 不会生成 method_summaries。
+    # Ablation B: 只使用显式 issue_query，不从 issue_focus/query_focus/SWE_ISSUE_TEXT 自动补全。
     deepen_issue_query = _build_deepen_issue_query(issue_query)
 
     # 执行深化
@@ -933,10 +761,10 @@ def deepen_file(
         max_neighbor_files=max_neighbor_files,
     )
 
-    # 统一更新三路检索索引：
+    # 更新检索索引：
     # - structural：deepen 新增 PARENT_CHILD/SIBLING/CALLS/OVERRIDES，必须 rebuild；
-    # - semantic：方案 C，更新已有 CLASS/FUNCTION/METHOD + 追加新增 METHOD；
-    # - BM25：已有节点文本变化时 rebuild，只有新增节点时 add_nodes。
+    # - semantic：更新已有 CLASS/FUNCTION/METHOD + 追加新增 METHOD；
+    # - BM25：Ablation B 中禁用。
     index_update_ok = True
     index_update_error = ""
 
@@ -962,9 +790,6 @@ def deepen_file(
         index_update_error=index_update_error,
     )
 
-    # 生成压缩版汇总：默认返回 5 个 issue-relevant methods，
-    # 每个 method summary 最多 3 条 high-confidence call evidence，最多 3 个 imported/neighbor files，
-    # 默认不返回 code_preview，避免大文件触发 Output too long。
     remaining = MAX_DEEPEN_FILES - len(graph.get_deepened_files())
     summary_limit = 5
     file_hint_limit = 3
@@ -975,7 +800,7 @@ def deepen_file(
     ]
 
     if index_update_ok:
-        lines.append("索引更新: hybrid semantic/structural/BM25 已刷新")
+        lines.append("索引更新: hybrid semantic/structural 已刷新")
     else:
         lines.append(f"索引更新: 失败，后续检索可能未包含本次深化内容；错误: {index_update_error}")
 
@@ -989,6 +814,7 @@ def deepen_file(
 
     if result.imported_files:
         lines.append("")
+        lines.append(f"导入相关文件（最多 {file_hint_limit} 个）:")
         for imp_file in result.imported_files[:file_hint_limit]:
             lines.append(f"  - {imp_file}")
         if len(result.imported_files) > file_hint_limit:
@@ -1058,7 +884,6 @@ def deepen_file(
 
     return "\n".join(lines)
 
-
 # ===========================================================================
 # 统一 dispatch 入口
 # ===========================================================================
@@ -1066,11 +891,11 @@ def deepen_file(
 TOOL_FUNCTIONS = {
     "search_structural": search_structural,
     "search_semantic": search_semantic,
-    "search_bm25": search_bm25,
+    # Ablation B: search_bm25 不注册给 agent。
+    # "search_bm25": search_bm25,
     "search_hybrid": search_hybrid,
     "deepen_file": deepen_file,
 }
-
 
 def dispatch(tool_name: str, args: dict) -> str:
     fn = TOOL_FUNCTIONS.get(tool_name)
@@ -1087,9 +912,6 @@ def dispatch(tool_name: str, args: dict) -> str:
             f"{tool_name} 参数错误: {e}; 收到参数: {args}"
         ) from e
 
-# ===========================================================================
-# Tool Schema
-# ===========================================================================
 RETRIEVAL_TOOLS = [
     {
         "type": "function",
@@ -1145,44 +967,11 @@ RETRIEVAL_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "search_bm25",
-            "description": (
-                "【BM25 词法/符号检索】根据文件名、类名、函数名、方法名、参数名、报错词、"
-                "issue_focus/query_focus 抽取出的 exact symbols 和 behavior/error terms 做词法召回。\n"
-                "适用场景：issue 中出现明确代码符号、文件路径、参数名、错误消息，"
-                "或 search_hybrid 的语义结果过泛时，用它补充精确符号召回。\n"
-                "注意：这是词法/符号检索，不是语义理解；如果 query 是纯自然语言行为描述，"
-                "通常先用 search_hybrid 或 search_semantic。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": (
-                            "BM25 查询。优先使用文件名、类名、函数名、方法名、参数名、错误词，"
-                            "也可以传当前 bug 行为描述，系统会结合 issue_focus/query_focus 生成多路短查询。"
-                        ),
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "description": "返回数量，默认 10",
-                        "default": 10,
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "search_semantic",
             "description": (
                 "【纯语义检索】只根据 query embedding 与节点 embedding 的相似度查找类、函数或方法节点。\n"
-                "适用场景：query 是自然语言行为描述、症状描述，或你希望绕开 BM25/结构扩展看纯语义近邻。\n"
-                "限制：不使用 issue_focus 多路 BM25，不主动扩展调用/继承/导入关系；"
-                "如果需要综合定位，优先用 search_hybrid。"
+                "适用场景：query 是自然语言行为描述、症状描述，或你希望查看纯语义近邻。\n"
+                "限制：不主动扩展调用/继承/导入关系；如果需要综合定位，优先用 search_hybrid。"
             ),
             "parameters": {
                 "type": "object",
@@ -1207,11 +996,10 @@ RETRIEVAL_TOOLS = [
             "name": "search_hybrid",
             "description": (
                 "【综合检索（推荐首选）】根据自然语言 query 定位相关代码节点。\n"
-                "内部融合三类信号：\n"
+                "Ablation B 模式：内部只融合两类信号：\n"
                 "1. semantic：根据节点 embedding 匹配行为/语义描述；\n"
-                "2. BM25：根据 issue_focus/query_focus/current query 做文件名、符号名、参数名、错误词召回；\n"
-                "3. structural：围绕 semantic/BM25 的高置信 seed 做图关系扩展。\n"
-                "返回节点ID、文件路径、行号、综合分、语义原因、BM25 命中和结构关系依据。\n"
+                "2. structural：围绕 semantic 高置信 seed 做图关系扩展。\n"
+                "返回节点ID、文件路径、行号、综合分、语义原因和结构关系依据。\n"
                 "推荐作为第一步定位入口。注意：初始图是骨架级；需要方法体、调用边或完整源码时，继续调用 deepen_file。"
             ),
             "parameters": {
@@ -1242,9 +1030,9 @@ RETRIEVAL_TOOLS = [
                 "- 更新已有 CLASS/FUNCTION 的完整 code_text/signature/docstring；\n"
                 "- 新增或更新 METHOD 节点；\n"
                 "- 补充 PARENT_CHILD、SIBLING、CALLS、OVERRIDES 等关系；\n"
-                "- 统一刷新 semantic、BM25、structural 三路索引；\n"
-                "- 基于 issue_query 或 issue_focus/query_focus 返回 issue-related method summary 和高置信调用证据。\n\n"
-                "使用时机：search_hybrid/search_bm25 找到有希望的源码文件后，"
+                "- 刷新 semantic、structural 两路索引；\n"
+                "- 如果显式提供 issue_query，则返回 issue-related method summary 和高置信调用证据。\n\n"
+                "使用时机：search_hybrid/search_semantic 找到有希望的源码文件后，"
                 "如果需要方法级细节、调用关系、重写关系或更准确的结构上下文，就深化该文件。"
                 "每个任务最多深化 20 个文件。"
             ),
@@ -1264,7 +1052,7 @@ RETRIEVAL_TOOLS = [
                         "description": (
                             "可选。当前 issue、当前检索 query 或与该文件相关的行为描述。"
                             "用于深化后生成 issue-related method summary。"
-                            "如果不传，系统会从 issue_focus/query_focus/SWE_ISSUE_TEXT 自动补全。"
+                            "Ablation B 中如果不传，不会自动从 issue_focus/query_focus/SWE_ISSUE_TEXT 补全。"
                         ),
                     },
                     "top_methods": {

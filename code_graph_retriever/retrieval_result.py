@@ -96,23 +96,18 @@ class RetrievalResult:
     def to_agent_text(self, show_code: bool = True) -> str:
         """
         生成面向 SWE-Agent LLM 的结构化文本。
-        这是 search_similar_code 工具的最终输出格式。
+        Ablation B: 输出中不展示 BM25 字段。
         """
         lines = [
             f"## {self.qualified_name}  [{self.node_type}]",
             f"文件: {self.file}  行: {self.start_line}~{self.end_line}",
             f"综合评分: {self.final_score:.3f}  "
-            f"（结构: {self.structural_score:.3f} | 语义: {self.semantic_score:.3f} | BM25: {self.bm25_score:.3f}）",
+            f"（结构: {self.structural_score:.3f} | 语义: {self.semantic_score:.3f}）",
         ]
         if self.structural_reason:
             lines.append(f"结构匹配依据: {self.structural_reason}")
         if self.semantic_reason:
             lines.append(f"语义关联说明: {self.semantic_reason}")
-        if self.bm25_reason:
-            lines.append(f"BM25词法命中: {self.bm25_reason}")
-        if self.bm25_hit_queries:
-            hit_q = ", ".join(self.bm25_hit_queries[:5])
-            lines.append(f"BM25命中查询: {hit_q}")
         if self.position_summary:
             lines.append(f"结构位置: {self.position_summary}")
         if self.comment:
