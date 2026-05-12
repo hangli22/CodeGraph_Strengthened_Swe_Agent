@@ -94,6 +94,63 @@ class LLMBackend(ABC):
         """
         ...
 
+class DeepSeekAPIBackend(LLMBackend):
+    """
+    使用 DeepSeek 官方 API（OpenAI 兼容接口）。
+
+    默认模型 deepseek-v4-flash，API Key 从环境变量 DEEPSEEK_API_KEY 获取。
+    """
+
+    API_URL = "https://api.deepseek.com/chat/completions"
+    MODEL = "deepseek-v4-flash"
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        timeout: int = 60,
+    ):
+        import os
+
+        self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+        if not self.api_key:
+            raise ValueError(
+                "未找到 DeepSeek API Key。\n"
+                "请设置环境变量 DEEPSEEK_API_KEY，\n"
+                "或在构造时传入 DeepSeekAPIBackend(api_key='...')"
+            )
+
+        self.model = model or self.MODEL
+        self.timeout = timeout
+
+    def generate(self, prompt: str) -> str:
+        import json
+        import urllib.request
+        import urllib.error
+
+        payload = json.dumps({
+            "model": self.model,
+            "max_tokens": 512,
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            self.API_URL,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data["choices"][0]["message"]["content"].strip()
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"DeepSeek API 错误 {e.code}: {body}") from e
+
 class UniAPIBackend(LLMBackend):
     """
     使用中国科技云 Uni-API（OpenAI 兼容接口）。

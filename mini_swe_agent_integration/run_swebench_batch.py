@@ -67,7 +67,75 @@ DATASET_MAPPING = {
     "full": "princeton-nlp/SWE-bench",
 }
 
+LLM_BACKEND_DEFAULTS = {
+    "uni": {
+        "api_base": "https://uni-api.cstcloud.cn/v1",
+        "api_key_env": "UNI_API_KEY",
+        "default_model": "openai/deepseek-v4-flash",
+        "issue_focus_model": "deepseek-v4-flash",
+    },
+    "deepseek": {
+        "api_base": "https://api.deepseek.com",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "default_model": "openai/deepseek-v4-flash",
+        "issue_focus_model": "deepseek-v4-flash",
+    },
+}
 
+
+def normalize_llm_backend(llm_backend: str) -> str:
+    backend = (llm_backend or "uni").strip().lower()
+    if backend in {"uni", "uni_api", "uni-api"}:
+        return "uni"
+    if backend in {"deepseek", "ds", "deepseek_api", "deepseek-api"}:
+        return "deepseek"
+    raise ValueError(
+        f"未知 --llm_backend: {llm_backend!r}。"
+        "可选值: uni, deepseek"
+    )
+
+
+def resolve_llm_config(
+    llm_backend: str,
+    model_name: str,
+    api_base: str,
+    api_key: str,
+) -> dict:
+    """
+    统一解析 LLM 配置。
+
+    优先级：
+      model_name: 命令行 > backend 默认
+      api_base : 命令行 > backend 默认
+      api_key  : 命令行 > backend 对应环境变量
+    """
+    backend = normalize_llm_backend(llm_backend)
+    defaults = LLM_BACKEND_DEFAULTS[backend]
+
+    resolved_model_name = model_name or defaults["default_model"]
+    resolved_api_base = api_base or defaults["api_base"]
+    resolved_api_key = api_key or os.environ.get(defaults["api_key_env"], "")
+
+    return {
+        "llm_backend": backend,
+        "model_name": resolved_model_name,
+        "api_base": resolved_api_base,
+        "api_key": resolved_api_key,
+        "api_key_env": defaults["api_key_env"],
+        "issue_focus_model": defaults["issue_focus_model"],
+    }
+
+
+def export_llm_env(config: dict) -> None:
+    """
+    给 issue_focus / retrieval_tools 这类非主模型调用链传递当前 backend。
+    """
+    os.environ["SWE_LLM_BACKEND"] = config["llm_backend"]
+    os.environ["SWE_LLM_API_BASE"] = config["api_base"]
+    os.environ["SWE_LLM_MODEL"] = config["issue_focus_model"]
+
+    if config.get("api_key"):
+        os.environ["SWE_LLM_API_KEY"] = config["api_key"]
 
 
 # ===========================================================================
@@ -264,6 +332,7 @@ def process_instance(
     model_name: str,
     api_base: str,
     api_key: str,
+    llm_backend: str,
     output_dir: str,
     repos_dir: str,
     cache_dir: str,
@@ -281,6 +350,29 @@ def process_instance(
     instance_id = instance["instance_id"]
     logger.info("[%s] 开始处理 (mode=%s)", instance_id, mode)
     t0 = time.perf_counter()
+
+    llm_config = resolve_llm_config(
+        llm_backend=llm_backend,
+        model_name=model_name,
+        api_base=api_base,
+        api_key=api_key,
+    )
+    export_llm_env(llm_config)
+
+    model_name = llm_config["model_name"]
+    api_base = llm_config["api_base"]
+    api_key = llm_config["api_key"]
+
+    logger.info(
+        "[%s] LLM backend=%s model=%s api_base=%s key_env=%s key=%s",
+        instance_id,
+        llm_config["llm_backend"],
+        model_name,
+        api_base,
+        llm_config["api_key_env"],
+        "SET" if api_key else "MISSING",
+    )
+
 
     agent = None
     agent_env = None
@@ -315,8 +407,9 @@ def process_instance(
                 cache_dir=instance_cache_dir,
                 instance_id=instance_id,
                 issue_text=instance["problem_statement"],
-                api_key=api_key or os.environ.get("UNI_API_KEY", ""),
-                model="deepseek-v4-flash",
+                api_key=api_key,
+                model=llm_config["issue_focus_model"],
+                llm_backend=llm_config["llm_backend"],
                 force=False,
             )
 
@@ -376,9 +469,8 @@ def process_instance(
     if api_base:
         model_kwargs["api_base"] = api_base
 
-    _key = api_key or os.environ.get("UNI_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
-    if _key:
-        model_kwargs["api_key"] = _key
+    if api_key:
+        model_kwargs["api_key"] = api_key
 
     instance_dir = os.path.join(output_dir, instance_id)
     os.makedirs(instance_dir, exist_ok=True)
@@ -601,15 +693,12 @@ def filter_instances(
     return instances
 
 
-# ===========================================================================
-# 批量处理主函数
-# ===========================================================================
-
 def run_batch(
     mode: str,
     model_name: str,
     api_base: str,
     api_key: str,
+    llm_backend: str,
     output_dir: str,
     repos_dir: str,
     cache_dir: str,
@@ -657,6 +746,7 @@ def run_batch(
             model_name=model_name,
             api_base=api_base,
             api_key=api_key,
+            llm_backend=llm_backend,
             output_dir=output_dir,
             repos_dir=repos_dir,
             cache_dir=cache_dir,
@@ -699,7 +789,9 @@ def run_batch(
         json.dump(
             {
                 "mode": mode,
+                "llm_backend": normalize_llm_backend(llm_backend),
                 "model_name": model_name,
+                "api_base": resolve_llm_config(llm_backend, model_name, api_base, api_key)["api_base"],
                 "total": len(summaries),
                 "instances": summaries,
             },
@@ -753,16 +845,8 @@ def _print_final_stats(summaries: list[dict], mode: str) -> None:
     print("      请用 sb-cli 提交 preds.json 获取真实 resolve_rate。")
 
 
-
-# ===========================================================================
-# 命令行入口
-# ===========================================================================
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="SWE-bench 批量评测（支持 Local/Docker 环境）",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+def main():
+    parser = argparse.ArgumentParser()
 
     parser.add_argument(
         "--mode",
@@ -771,9 +855,27 @@ def main() -> None:
         help="retrieval=实验组（带检索工具），baseline=对照组（裸mini-swe-agent）",
     )
 
-    parser.add_argument("--model_name", default="openai/deepseek-v3:671b", help="模型名")
-    parser.add_argument("--api_base", default="https://uni-api.cstcloud.cn/v1", help="API 接入点")
-    parser.add_argument("--api_key", default="", help="API Key")
+    parser.add_argument(
+        "--llm_backend",
+        default="uni",
+        choices=["uni", "deepseek", "ds"],
+        help="LLM 后端：uni=中国科技云 Uni-API；deepseek/ds=DeepSeek 官方 API",
+    )
+    parser.add_argument(
+        "--model_name",
+        default="",
+        help="模型名。留空时根据 --llm_backend 使用默认模型。",
+    )
+    parser.add_argument(
+        "--api_base",
+        default="",
+        help="API 接入点。留空时根据 --llm_backend 自动选择。",
+    )
+    parser.add_argument(
+        "--api_key",
+        default="",
+        help="API Key。留空时 uni 读取 UNI_API_KEY，deepseek 读取 DEEPSEEK_API_KEY。",
+    )
 
     parser.add_argument("--subset", default="lite", choices=["lite", "verified", "full"])
     parser.add_argument("--split", default="test")
@@ -800,6 +902,22 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    llm_config = resolve_llm_config(
+        llm_backend=args.llm_backend,
+        model_name=args.model_name,
+        api_base=args.api_base,
+        api_key=args.api_key,
+    )
+
+    logger.info(
+        "LLM 配置: backend=%s model=%s api_base=%s key_env=%s key=%s",
+        llm_config["llm_backend"],
+        llm_config["model_name"],
+        llm_config["api_base"],
+        llm_config["api_key_env"],
+        "SET" if llm_config["api_key"] else "MISSING",
+    )
+
     instances = load_instances(args.subset, args.split)
     instances = filter_instances(
         instances,
@@ -813,9 +931,10 @@ def main() -> None:
 
     run_batch(
         mode=args.mode,
-        model_name=args.model_name,
-        api_base=args.api_base,
-        api_key=args.api_key,
+        model_name=llm_config["model_name"],
+        api_base=llm_config["api_base"],
+        api_key=llm_config["api_key"],
+        llm_backend=llm_config["llm_backend"],
         output_dir=args.output_dir,
         repos_dir=args.repos_dir,
         cache_dir=args.cache_dir,
@@ -832,7 +951,6 @@ def main() -> None:
         docker_timeout=args.docker_timeout,
         container_timeout=args.container_timeout,
     )
-
 
 if __name__ == "__main__":
     main()

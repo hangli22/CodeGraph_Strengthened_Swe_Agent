@@ -15,13 +15,13 @@ python mini_swe_agent_integration/run_swebench_batch.py \
   --redo
 
 python mini_swe_agent_integration/run_swebench_batch.py \
-  --mode retrieval \
+  --mode baseline \
   --model_name openai/deepseek-v4-flash \
   --api_base https://uni-api.cstcloud.cn/v1 \
   --subset lite \
   --split test \
-  --slice 20:21 \
-  --output_dir ./results/retrieval_zhou_09 \
+  --slice 10:30 \
+  --output_dir ./results/retrieval_lihang_12 \
   --repos_dir ./repos \
   --cache_dir ./cache \
   --workers 1 \
@@ -40,8 +40,8 @@ python - <<'PY'
 import json
 from pathlib import Path
 
-iid = "django__django-11630"
-traj = Path(f"./results/retrieval_zhou_09/{iid}/{iid}.traj.json")
+iid = "django__django-11910"
+traj = Path(f"./results/retrieval_lihang_12/{iid}/{iid}.traj.json")
 data = json.loads(traj.read_text(encoding="utf-8"))
 out_path = traj.parent / f"message_300_600_{iid}.md"
 CONTENT_LIMIT = 300
@@ -137,3 +137,22 @@ mkdir -p "$dst"
 mv "$src" "$dst"/
 
 ## 
+
+
+export DEEPSEEK_API_KEY="sk-670a8b43bf1c4988889c95cdc5f74ecd"
+
+python mini_swe_agent_integration/run_swebench_batch.py \
+  --mode retrieval \
+  --llm_backend deepseek \
+  --model_name openai/deepseek-v4-flash \
+  --subset lite \
+  --split test \
+  --slice 0:1 \
+  --output_dir ./results/smoke_ds_0_1 \
+  --repos_dir ./repos \
+  --cache_dir ./cache \
+  --workers 1 \
+  --step_limit 3 \
+  --use_docker \
+  --docker_image sweagent-multipy:latest \
+  --redo

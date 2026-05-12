@@ -119,8 +119,26 @@ class RetrievalModel(LitellmModel):
         import litellm
 
         model_kwargs = self.config.model_kwargs | kwargs
-        api_base = model_kwargs.get("api_base") or "https://uni-api.cstcloud.cn/v1"
-        api_key = model_kwargs.get("api_key") or os.environ.get("UNI_API_KEY", "")
+
+        llm_backend = (model_kwargs.get("llm_backend") or os.environ.get("SWE_LLM_BACKEND", "uni")).strip().lower()
+
+        if llm_backend in {"deepseek", "ds", "deepseek_api", "deepseek-api"}:
+            default_api_base = "https://api.deepseek.com"
+            default_api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        else:
+            default_api_base = "https://uni-api.cstcloud.cn/v1"
+            default_api_key = os.environ.get("UNI_API_KEY", "")
+
+        api_base = (
+            model_kwargs.get("api_base")
+            or os.environ.get("SWE_LLM_API_BASE", "")
+            or default_api_base
+        )
+        api_key = (
+            model_kwargs.get("api_key")
+            or os.environ.get("SWE_LLM_API_KEY", "")
+            or default_api_key
+        )
 
         model_name = self.config.model_name
         if not model_name.startswith("openai/"):
@@ -135,6 +153,8 @@ class RetrievalModel(LitellmModel):
             tool_choice=model_kwargs.get("tool_choice", "auto"),
             temperature=model_kwargs.get("temperature", 0.0),
             max_tokens=model_kwargs.get("max_tokens"),
+            timeout=model_kwargs.get("timeout"),
+            drop_params=model_kwargs.get("drop_params", True),
         )
 
     def _parse_actions(self, response) -> list[dict]:
