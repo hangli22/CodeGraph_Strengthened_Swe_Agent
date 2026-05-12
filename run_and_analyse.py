@@ -18,6 +18,53 @@ python run_and_analyse.py \
   --running-log running.md \
   --analyse-log annlyse_result.md
 
+ds运行模板：
+export DEEPSEEK_API_KEY='sk-670a8b43bf1c4988889c95cdc5f74ecd'
+BATCH="python mini_swe_agent_integration/run_swebench_batch.py \
+  --mode retrieval \
+  --llm_backend deepseek \
+  --model_name openai/deepseek-v4-flash \
+  --subset lite \
+  --split test \
+  --slice 0:1 \
+  --output_dir ./results/smoke_ds_0_1 \
+  --repos_dir ./repos \
+  --cache_dir ./cache \
+  --workers 1 \
+  --step_limit 60 \
+  --use_docker \
+  --docker_image sweagent-multipy:latest \
+  --redo"
+  python run_and_analyse.py \
+  --batch-cmd "$BATCH" \
+  --running-log running_ds.md \
+  --analyse-log analyse_ds.md
+
+  uni运行模板：
+  export DEEPSEEK_API_KEY='sk-670a8b43bf1c4988889c95cdc5f74ecd'
+  BATCH="python mini_swe_agent_integration/run_swebench_batch.py \
+  --mode retrieval \
+  --llm_backend uni \
+  --model_name openai/deepseek-v4-flash \
+  --subset lite \
+  --split test \
+  --slice 0:1 \
+  --output_dir ./results/smoke_uni_0_1 \
+  --repos_dir ./repos \
+  --cache_dir ./cache \
+  --workers 1 \
+  --step_limit 60 \
+  --use_docker \
+  --docker_image sweagent-multipy:latest \
+  --redo"
+  python run_and_analyse.py \
+  --batch-cmd "$BATCH" \
+  --running-log running_uni.md \
+  --analyse-log analyse_uni.md
+
+
+
+
 """
 # 尚未测试
 # =========================
@@ -33,8 +80,8 @@ BATCH_CMD = [
     sys.executable,
     "mini_swe_agent_integration/run_swebench_batch.py",
     "--mode", "retrieval",
+    "--llm_backend", "uni",
     "--model_name", "openai/deepseek-v4-flash",
-    "--api_base", "https://uni-api.cstcloud.cn/v1",
     "--subset", "lite",
     "--split", "test",
     "--slice", "10:30",
@@ -47,7 +94,6 @@ BATCH_CMD = [
     "--docker_image", "sweagent-multipy:latest",
     "--redo",
 ]
-
 
 # =========================
 # Helpers

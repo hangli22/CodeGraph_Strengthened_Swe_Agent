@@ -245,9 +245,22 @@ def _build_bm25_bundle_for_query(query: str, retrieval_step: int = 0):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     try:
-        from code_graph_retriever.issue_focus import IssueFocusStore
+        from code_graph_retriever.issue_focus import (
+            IssueFocusStore,
+            make_issue_focus_backend,
+        )
 
-        store = IssueFocusStore(cache_dir=_get_cache_dir())
+        backend = make_issue_focus_backend(
+            llm_backend=os.environ.get("SWE_LLM_BACKEND", "uni"),
+            api_key=os.environ.get("SWE_LLM_API_KEY", "") or None,
+            model=os.environ.get("SWE_LLM_MODEL", "") or None,
+            timeout=int(os.environ.get("SWE_LLM_TIMEOUT", "60")),
+        )
+
+        store = IssueFocusStore(
+            cache_dir=_get_cache_dir(),
+            backend=backend,
+        )
 
         try:
             return store.build_bm25_query_bundle(
@@ -269,6 +282,7 @@ def _build_bm25_bundle_for_query(query: str, retrieval_step: int = 0):
                 max_queries=12,
                 retrieval_step=retrieval_step,
             )
+
     except Exception as e:
         logger.warning("issue_focus 不可用，BM25 将仅使用当前 query: %s", e)
 

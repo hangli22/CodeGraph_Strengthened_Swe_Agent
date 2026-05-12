@@ -1,0 +1,24 @@
+{
+  "status": "built",
+  "build_mode": "skeleton",
+  "instance_id": "astropy__astropy-12907",
+  "repo_path": "./repos/astropy__astropy-12907",
+  "cache_dir": "./cache/astropy__astropy-12907",
+  "graph_stats": {
+    "total_nodes": 8103,
+    "total_edges": 11900,
+    "skeleton_files": 910,
+    "deepened_files": 0,
+    "nodes_MODULE": 910,
+    "nodes_FUNCTION": 5354,
+    "nodes_CLASS": 1839,
+    "edges_IMPORTS": 3326,
+    "edges_CONTAINS": 7193,
+    "edges_INHERITS": 1381
+  },
+  "n_semantic": 7193,
+  "embed_dim": 1024,
+  "embed_backend": "DashScopeEmbeddingBackend",
+  "total_elapsed_s": 477.69,
+  "built_at": "2026-05-12 11:23:12"
+}

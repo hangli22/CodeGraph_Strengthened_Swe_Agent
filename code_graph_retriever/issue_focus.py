@@ -90,6 +90,98 @@ class UniAPIBackend:
             raise RuntimeError(f"Uni-API 错误 {e.code}: {body}") from e
 
 
+
+class DeepSeekAPIBackend:
+    """
+    使用 DeepSeek 官方 API（OpenAI 兼容接口）。
+
+    默认模型 deepseek-v4-flash，API Key 从环境变量 DEEPSEEK_API_KEY 获取。
+    接口风格与 UniAPIBackend 保持一致。
+    """
+
+    API_URL = "https://api.deepseek.com/chat/completions"
+    MODEL = "deepseek-v4-flash"
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        timeout: int = 60,
+    ):
+        self.api_key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+        if not self.api_key:
+            raise ValueError(
+                "未找到 DeepSeek API Key。\n"
+                "请设置环境变量 DEEPSEEK_API_KEY，\n"
+                "或在构造时传入 DeepSeekAPIBackend(api_key='...')"
+            )
+
+        self.model = model or self.MODEL
+        self.timeout = timeout
+
+    def generate(self, prompt: str) -> str:
+        import urllib.request
+        import urllib.error
+
+        payload = json.dumps({
+            "model": self.model,
+            "max_tokens": 768,
+            "temperature": 0.0,
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            self.API_URL,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data["choices"][0]["message"]["content"].strip()
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"DeepSeek API 错误 {e.code}: {body}") from e
+
+
+def make_issue_focus_backend(
+    llm_backend: str = "uni",
+    api_key: Optional[str] = None,
+    model: Optional[str] = None,
+    timeout: int = 60,
+):
+    """
+    根据 llm_backend 创建 issue_focus 使用的 LLM backend。
+
+    llm_backend:
+      - "uni": 中国科技云 Uni-API
+      - "deepseek" / "ds": DeepSeek 官方 API
+    """
+    backend = (llm_backend or "uni").strip().lower()
+
+    if backend in {"uni", "uni_api", "uni-api"}:
+        return UniAPIBackend(
+            api_key=api_key,
+            model=model,
+            timeout=timeout,
+        )
+
+    if backend in {"deepseek", "ds", "deepseek_api", "deepseek-api"}:
+        return DeepSeekAPIBackend(
+            api_key=api_key,
+            model=model,
+            timeout=timeout,
+        )
+
+    raise ValueError(
+        f"未知 llm_backend: {llm_backend!r}。"
+        "可选值: uni, deepseek"
+    )
+
 # ===========================================================================
 # 数据结构
 # ===========================================================================
@@ -471,10 +563,6 @@ class IssueFocusStore:
         except Exception:
             return ranked
 
-# ===========================================================================
-# LLM 抽取
-# ===========================================================================
-
 def extract_focus_with_llm(
     text: str,
     source_type: str,
@@ -491,7 +579,13 @@ def extract_focus_with_llm(
     if not text:
         return IssueFocus(source_type=source_type, source_text="").normalize()
 
-    backend = backend or UniAPIBackend()
+    if backend is None:
+        backend = make_issue_focus_backend(
+            llm_backend=os.environ.get("SWE_LLM_BACKEND", "uni"),
+            api_key=os.environ.get("SWE_LLM_API_KEY", "") or None,
+            model=os.environ.get("SWE_LLM_MODEL", "") or None,
+            timeout=int(os.environ.get("SWE_LLM_TIMEOUT", "60")),
+        )
 
     prompt = _build_focus_prompt(text=text, source_type=source_type)
 
@@ -997,17 +1091,13 @@ def _make_error_queries(focus: IssueFocus) -> List[str]:
         *focus.error_terms[:5],
     ])
 
-
-# ===========================================================================
-# 顶层便捷函数：run_swebench_batch.py 可直接调用
-# ===========================================================================
-
 def ensure_issue_focus_for_instance(
     cache_dir: str,
     instance_id: str,
     issue_text: str,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
+    llm_backend: str = "uni",
     force: bool = False,
 ) -> IssueFocus:
     """
@@ -1016,7 +1106,12 @@ def ensure_issue_focus_for_instance(
     如果 cache/{instance_id}/issue_focus.json 已有 initial_issue_focus，
     且 force=False，则不会再次调用 LLM。
     """
-    backend = UniAPIBackend(api_key=api_key, model=model) if (api_key or model) else None
+    backend = make_issue_focus_backend(
+        llm_backend=llm_backend,
+        api_key=api_key,
+        model=model,
+    )
+
     store = IssueFocusStore(
         cache_dir=cache_dir,
         instance_id=instance_id,
@@ -1024,21 +1119,25 @@ def ensure_issue_focus_for_instance(
     )
     return store.ensure_initial_issue_focus(issue_text, force=force)
 
-
 def update_query_focus_for_instance(
     cache_dir: str,
     query: str,
     api_key: Optional[str] = None,
     model: Optional[str] = None,
+    llm_backend: str = "uni",
 ) -> IssueFocus:
     """
     后续 search_hybrid/search_bm25 如果希望把当前 query 也结构化存储，
     可以调用这个函数覆盖 query_focus。
     """
-    backend = UniAPIBackend(api_key=api_key, model=model) if (api_key or model) else None
+    backend = make_issue_focus_backend(
+        llm_backend=llm_backend,
+        api_key=api_key,
+        model=model,
+    )
+
     store = IssueFocusStore(cache_dir=cache_dir, backend=backend)
     return store.update_query_focus(query, force=True)
-
 
 # ===========================================================================
 # 小工具
