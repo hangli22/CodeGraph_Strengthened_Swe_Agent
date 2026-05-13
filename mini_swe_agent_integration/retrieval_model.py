@@ -157,7 +157,7 @@ class RetrievalModel(TokenUsageMixin, LitellmModel):
             model=model_name,
             api_base=api_base,
             api_key=api_key,
-            messages=messages,
+            messages=self._repair_dangling_tool_calls(messages),
             tools=[BASH_TOOL] + RETRIEVAL_TOOLS,
             tool_choice=model_kwargs.get("tool_choice", "auto"),
             temperature=model_kwargs.get("temperature", 0.0),
@@ -402,10 +402,18 @@ class RetrievalModel(TokenUsageMixin, LitellmModel):
         """
         将执行结果格式化为 OpenAI tool response 消息。
 
-        每个 output 对应一个：
-          {"role": "tool", "tool_call_id": ..., "content": ...}
+        强约束：
+        - 当前策略每轮只执行一个 tool call；
+        - 因此这里只允许一个 action + 一个 output；
+        - 避免 assistant tool_calls 数量和 tool response 数量不一致。
         """
-        actions = message.get("extra", {}).get("actions", [])
+        actions = message.get("extra", {}).get("actions", []) or []
+
+        if actions:
+            actions = actions[:1]
+        if outputs:
+            outputs = outputs[:1]
+
         return format_toolcall_observation_messages(
             actions=actions,
             outputs=outputs,
@@ -413,3 +421,81 @@ class RetrievalModel(TokenUsageMixin, LitellmModel):
             template_vars=template_vars,
             multimodal_regex=self.config.multimodal_regex,
         )
+
+    @staticmethod
+    def _message_get_role(msg: Any) -> str:
+        try:
+            return str(msg.get("role", "") or "")
+        except Exception:
+            return str(getattr(msg, "role", "") or "")
+
+    @staticmethod
+    def _message_get_tool_calls(msg: Any):
+        try:
+            return msg.get("tool_calls", []) or []
+        except Exception:
+            return getattr(msg, "tool_calls", []) or []
+
+    @staticmethod
+    def _message_get_tool_call_id(msg: Any) -> str:
+        try:
+            return str(msg.get("tool_call_id", "") or "")
+        except Exception:
+            return str(getattr(msg, "tool_call_id", "") or "")
+
+    @staticmethod
+    def _tool_call_get_id(tc: Any) -> str:
+        try:
+            return str(tc.get("id", "") or "")
+        except Exception:
+            return str(getattr(tc, "id", "") or "")
+
+    @classmethod
+    def _repair_dangling_tool_calls(cls, messages: list[dict]) -> list[dict]:
+        """
+        发送给 OpenAI/DeepSeek 前修复历史中悬空的 tool_calls。
+
+        如果某条 assistant message 有 tool_calls，但后面没有对应 tool message，
+        就补一个 synthetic tool message，避免 API 直接 400。
+
+        这是兜底，不替代 agent 层的一一对应修复。
+        """
+        repaired = []
+        i = 0
+
+        while i < len(messages):
+            msg = messages[i]
+            repaired.append(msg)
+
+            role = cls._message_get_role(msg)
+            tool_calls = cls._message_get_tool_calls(msg)
+
+            if role == "assistant" and tool_calls:
+                expected_ids = [
+                    cls._tool_call_get_id(tc)
+                    for tc in tool_calls
+                    if cls._tool_call_get_id(tc)
+                ]
+
+                found_ids = set()
+                j = i + 1
+                while j < len(messages) and cls._message_get_role(messages[j]) == "tool":
+                    tid = cls._message_get_tool_call_id(messages[j])
+                    if tid:
+                        found_ids.add(tid)
+                    j += 1
+
+                for tid in expected_ids:
+                    if tid not in found_ids:
+                        repaired.append({
+                            "role": "tool",
+                            "tool_call_id": tid,
+                            "content": (
+                                "[tool execution skipped] This tool call was not executed "
+                                "because the agent policy allows only one tool call per turn."
+                            ),
+                        })
+
+            i += 1
+
+        return repaired
