@@ -5,7 +5,6 @@ retrieval_tools.py — 检索工具 + deepen_file 工具
 提供给 RetrievalAgent / RetrievalModel 的工具函数：
 
 - search_hybrid:     语义 + 结构混合检索，用自然语言 query 找相关节点
-- search_semantic:   语义检索，用自然语言 query 找相关节点
 - search_structural: 粗粒度结构关系检索，用已知 node_id 做关系扩展
 - deepen_file:       按需深化文件，补充方法级节点和调用边
 
@@ -209,7 +208,7 @@ def clear_retrieval_cache() -> None:
     清空 retrieval_tools 的进程内缓存。
 
     必须在切换 SWE-bench instance / repo / CODE_GRAPH_CACHE_DIR 后调用。
-    否则 _cache 中可能仍然保存上一个 instance 的 graph、semantic retriever、
+    否则 _cache 中可能仍然保存上一个 instance 的 graph、
     structural retriever，导致新 instance 使用旧代码图。
 
     同时清空 per-instance deepen 统计，确保每个 instance 独立计数。
@@ -383,16 +382,14 @@ def _load_hybrid_retriever():
 
     graph = _load_cached("graph", _load_graph)
     struct_retriever = _load_cached("structural_retriever", _load_structural_retriever)
-    sem_retriever = _load_cached("semantic_retriever", _load_semantic_retriever)
     bm25_retriever = _load_cached("bm25_retriever", _load_bm25_retriever)
 
     retriever = HybridRetriever(graph)
     retriever._structural = struct_retriever
-    retriever._semantic = sem_retriever
+    retriever._semantic = None
     retriever._bm25 = bm25_retriever
     retriever._built = True
     return retriever
-
 
 def _build_bm25_bundle_for_query(query: str, retrieval_step: int = 0):
     """
@@ -557,7 +554,7 @@ def search_structural(
                 f"关系模式: {query_mode.value}\n"
                 f"检索范围: {response.total_nodes} 个节点  "
                 f"耗时: {response.elapsed_ms:.1f}ms\n"
-                f"提示：请确认 node_id 是否来自 search_hybrid/search_semantic 的结果，"
+                f"提示：请确认 node_id 是否来自 search_hybrid 的结果，"
                 f"而不是自然语言 query。"
             )
 
@@ -770,7 +767,7 @@ def search_hybrid(query: str, top_k: int = 5) -> str:
             f"[hybrid_search] 找到 {len(response.results)} 个相关节点",
             f"查询: {query}",
             f"检索范围: {response.total_nodes} 个节点  耗时: {response.elapsed_ms:.1f}ms",
-            "说明: semantic 负责语义候选，BM25(issue_focus+query) 负责词法召回，结构检索负责围绕高置信 seed 扩展关系节点",
+            "BM25(issue_focus+query) 负责词法召回，结构检索负责围绕高置信 seed 扩展关系节点",
             f"BM25查询组: {_format_bm25_group_summary(bm25_bundle)}",
             f"BM25 issue_focus 衰减步数: {retrieval_step}",
             "=" * 60,
@@ -783,13 +780,13 @@ def search_hybrid(query: str, top_k: int = 5) -> str:
                 f"    节点ID: {r.node_id}",
                 f"    文件: {r.file}  行: {r.start_line}~{r.end_line}",
                 f"    综合评分: {r.final_score:.3f}  "
-                f"（结构: {r.structural_score:.3f} | 语义: {r.semantic_score:.3f} | BM25: {bm25_score:.3f}）",
+                f"（结构: {r.structural_score:.3f} | BM25: {bm25_score:.3f}）",
             ]
 
             if r.structural_reason:
                 lines.append(f"    结构关系依据: {r.structural_reason}")
-            if r.semantic_reason:
-                lines.append(f"    语义关联说明: {r.semantic_reason}")
+            # if r.semantic_reason:
+            #     lines.append(f"    语义关联说明: {r.semantic_reason}")
             bm25_reason = getattr(r, "bm25_reason", "") or ""
             if bm25_reason:
                 lines.append(f"    BM25词法命中: {bm25_reason}")
@@ -845,7 +842,7 @@ def deepen_file(
     # semantic retriever 需要提前加载：
     # 1. 给 FileDeepener 提供 embedding_backend；
     # 2. HybridRetriever 内部也会复用同一个 cached semantic retriever。
-    sem_ret = _load_cached("semantic_retriever", _load_semantic_retriever)
+    # sem_ret = _load_cached("semantic_retriever", _load_semantic_retriever)
 
     # 统一融合检索器。它内部复用 cached structural / semantic / BM25。
     # deepen 后只通过 hybrid_ret.rebuild_after_deepen() 更新三路索引。
@@ -922,7 +919,7 @@ def deepen_file(
     deepener = FileDeepener(
         graph=graph,
         repo_root=graph.repo_root,
-        embedding_backend=sem_ret.backend,
+        embedding_backend=None,
     )
 
     result = deepener.deepen(
@@ -975,7 +972,7 @@ def deepen_file(
     ]
 
     if index_update_ok:
-        lines.append("索引更新: hybrid semantic/structural/BM25 已刷新")
+        lines.append("索引更新: hybrid /structural/BM25 已刷新")
     else:
         lines.append(f"索引更新: 失败，后续检索可能未包含本次深化内容；错误: {index_update_error}")
 
@@ -1065,7 +1062,6 @@ def deepen_file(
 
 TOOL_FUNCTIONS = {
     "search_structural": search_structural,
-    "search_semantic": search_semantic,
     "search_bm25": search_bm25,
     "search_hybrid": search_hybrid,
     "deepen_file": deepen_file,
@@ -1097,7 +1093,7 @@ RETRIEVAL_TOOLS = [
             "name": "search_structural",
             "description": (
                 "【粗粒度结构关系检索】给定一个已知 node_id，在代码图中查找结构上相关的节点。\n"
-                "这个工具不是自然语言搜索工具；必须使用 search_hybrid/search_semantic 等结果中的 node_id 作为输入。\n"
+                "这个工具不是自然语言搜索工具；必须使用 search_hybrid 等结果中的 node_id 作为输入。\n"
                 "支持关系模式：\n"
                 "- siblings: 同类方法、同模块类、同包文件中的兄弟节点\n"
                 "- inheritance: 父类、子类、共父兄弟类、父类同名方法\n"
@@ -1112,7 +1108,7 @@ RETRIEVAL_TOOLS = [
                     "node_id": {
                         "type": "string",
                         "description": (
-                            "已知节点 ID。必须来自 search_hybrid/search_semantic/search_structural 的结果，"
+                            "已知节点 ID。必须来自 search_hybrid/search_structural 的结果，"
                             "例如结果中的“节点ID”字段。不要传自然语言 query。"
                         ),
                     },
@@ -1152,7 +1148,7 @@ RETRIEVAL_TOOLS = [
                 "适用场景：issue 中出现明确代码符号、文件路径、参数名、错误消息，"
                 "或 search_hybrid 的语义结果过泛时，用它补充精确符号召回。\n"
                 "注意：这是词法/符号检索，不是语义理解；如果 query 是纯自然语言行为描述，"
-                "通常先用 search_hybrid 或 search_semantic。"
+                "通常先用 search_hybrid 。"
             ),
             "parameters": {
                 "type": "object",
@@ -1168,33 +1164,6 @@ RETRIEVAL_TOOLS = [
                         "type": "integer",
                         "description": "返回数量，默认 10",
                         "default": 10,
-                    },
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_semantic",
-            "description": (
-                "【纯语义检索】只根据 query embedding 与节点 embedding 的相似度查找类、函数或方法节点。\n"
-                "适用场景：query 是自然语言行为描述、症状描述，或你希望绕开 BM25/结构扩展看纯语义近邻。\n"
-                "限制：不使用 issue_focus 多路 BM25，不主动扩展调用/继承/导入关系；"
-                "如果需要综合定位，优先用 search_hybrid。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "自然语言语义查询，例如目标行为、bug 症状、错误现象。",
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "description": "返回数量，默认 5",
-                        "default": 5,
                     },
                 },
                 "required": ["query"],

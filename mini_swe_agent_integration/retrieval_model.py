@@ -42,7 +42,7 @@ You MUST include exactly one valid tool call in your response.
 Do not include multiple tool calls.
 Do not include multiple tool calls.
 If you include multiple tool calls, only the first valid tool call will be executed and all later tool calls will be discarded from the conversation history.
-Available tools: bash, search_hybrid, deepen_file, search_semantic, search_structural.
+Available tools: bash, search_hybrid,search_bm25, deepen_file, search_structural.
 
 - Use `bash` for ALL shell operations: read files, edit files, run scripts, git commands, and submit.
 - Use `search_hybrid` as the default first retrieval tool.

@@ -52,8 +52,8 @@ python - <<'PY'
 import json
 from pathlib import Path
 
-iid = "django__django-11910"
-traj = Path(f"./results/retrieval_lihang_11/{iid}/{iid}.traj.json")
+iid = "django__django-11630"
+traj = Path(f"./results/ablation_no_semantic_20_21/{iid}/{iid}.traj.json")
 data = json.loads(traj.read_text(encoding="utf-8"))
 out_path = traj.parent / f"message_300_600_{iid}.md"
 CONTENT_LIMIT = 800
