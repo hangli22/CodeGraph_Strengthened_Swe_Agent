@@ -95,6 +95,85 @@ class RetrievalAgent(DefaultAgent):
             step_notice_interval=10,
         )
 
+    @staticmethod
+    def _get_tool_call_id_from_tool_call(tc: Any) -> str:
+        """兼容 object/dict 两种 tool_call，提取 id。"""
+        if tc is None:
+            return ""
+        try:
+            return str(tc.id or "")
+        except Exception:
+            pass
+        try:
+            return str(tc.get("id", "") or "")
+        except Exception:
+            return ""
+
+    @classmethod
+    def _keep_only_executed_tool_call_in_message(cls, message: dict, tool_call_id: str) -> None:
+        """
+        强制把即将进入历史的 assistant message 裁剪到唯一实际执行的 tool_call。
+
+        为什么需要：
+        - RetrievalModel._parse_actions() 虽然会裁剪 response；
+        - 但 mini-swe-agent 内部可能已经把原始 response 转成了 message；
+        - 如果 message["tool_calls"] 仍保留多个，而 observation 只有一个 role=tool，
+          下一轮 OpenAI/DeepSeek API 会报：
+          assistant message with tool_calls must be followed by tool messages...
+        """
+        if not isinstance(message, dict) or not tool_call_id:
+            return
+
+        def _filter_tool_calls(tool_calls):
+            kept = []
+            for tc in tool_calls or []:
+                if cls._get_tool_call_id_from_tool_call(tc) == tool_call_id:
+                    kept.append(tc)
+            return kept
+
+        # 1) 顶层 message["tool_calls"]
+        try:
+            if message.get("tool_calls"):
+                message["tool_calls"] = _filter_tool_calls(message.get("tool_calls"))
+        except Exception:
+            pass
+
+        # 2) extra.response.choices[0].message.tool_calls
+        extra = message.get("extra", {}) or {}
+        response = extra.get("response")
+        if response is not None:
+            try:
+                choices = getattr(response, "choices", None)
+                if choices:
+                    resp_msg = choices[0].message
+                    tool_calls = getattr(resp_msg, "tool_calls", None)
+                    if tool_calls:
+                        resp_msg.tool_calls = _filter_tool_calls(tool_calls)
+            except Exception:
+                pass
+
+            try:
+                choices = response.get("choices", [])
+                if choices:
+                    resp_msg = choices[0].get("message")
+                    if isinstance(resp_msg, dict) and resp_msg.get("tool_calls"):
+                        resp_msg["tool_calls"] = _filter_tool_calls(resp_msg.get("tool_calls"))
+            except Exception:
+                pass
+
+        # 3) extra.actions 也只保留当前执行的 action
+        try:
+            actions = extra.get("actions", []) or []
+            kept_actions = [
+                a for a in actions
+                if a.get("tool_call_id") == tool_call_id
+            ]
+            if kept_actions:
+                extra["actions"] = kept_actions[:1]
+                message["extra"] = extra
+        except Exception:
+            pass
+
     def execute_actions(self, message: dict) -> list[dict]:
         """
         执行 LLM 返回的 action，返回追加到对话历史的消息列表。
@@ -126,6 +205,14 @@ class RetrievalAgent(DefaultAgent):
             actions,
         )
         if multi_tool_outputs is not None:
+            # 兜底：即使上游传来了多个 actions，也只保留第一个 tool_call，
+            # 避免 assistant message 有多个 tool_calls 但 observation 只有一个 tool message。
+            first_action = actions[0] if actions else {}
+            self._keep_only_executed_tool_call_in_message(
+                message,
+                first_action.get("tool_call_id", ""),
+            )
+
             step_notice = self._convergence_guard.advance_step_and_maybe_make_notice()
             if step_notice:
                 self._convergence_guard.append_notice_to_outputs(
@@ -137,11 +224,20 @@ class RetrievalAgent(DefaultAgent):
             return self.add_messages(
                 *self.model.format_observation_messages(
                     message,
-                    multi_tool_outputs,
+                    multi_tool_outputs[:1],
                     self.get_template_vars(),
                 )
             )
 
+        action = actions[0]
+
+        # 关键修复：只保留实际执行的这个 tool_call。
+        # 否则 assistant message 可能有多个 tool_calls，但后面只有一个 tool response。
+        self._keep_only_executed_tool_call_in_message(
+            message,
+            action.get("tool_call_id", ""),
+        )
+        actions = message.get("extra", {}).get("actions", []) or [action]
         action = actions[0]
 
         # ------------------------------------------------------------
@@ -172,12 +268,16 @@ class RetrievalAgent(DefaultAgent):
         if step_notice:
             self._convergence_guard.append_notice_to_outputs(outputs, step_notice)
 
+        self._keep_only_executed_tool_call_in_message(
+            message,
+            action.get("tool_call_id", ""),
+        )
         self._sanitize_toolcall_assistant_message(message)
 
         return self.add_messages(
             *self.model.format_observation_messages(
                 message,
-                outputs,
+                outputs[:1],
                 self.get_template_vars(),
             )
         )
