@@ -26,7 +26,7 @@ from minisweagent.models.utils.actions_toolcall import (
 )
 
 from .retrieval_tools import RETRIEVAL_TOOLS, TOOL_FUNCTIONS
-
+from .token_usage import TokenUsageMixin
 logger = logging.getLogger(__name__)
 
 _ALLOWED_TOOLS = {"bash"} | set(TOOL_FUNCTIONS.keys())
@@ -100,7 +100,7 @@ class RetrievalModelConfig(LitellmModelConfig):
         super().__init__(**kwargs)
 
 
-class RetrievalModel(LitellmModel):
+class RetrievalModel(TokenUsageMixin, LitellmModel):
     """
     支持 bash + 检索工具的 function-calling 模型。
 
@@ -115,6 +115,7 @@ class RetrievalModel(LitellmModel):
 
     def __init__(self, *, config_class=RetrievalModelConfig, **kwargs):
         super().__init__(config_class=config_class, **kwargs)
+        self._init_token_usage()
 
     def _query(self, messages: list[dict], **kwargs):
         """发送带 tools 参数的请求，启用 function calling。"""
@@ -152,7 +153,7 @@ class RetrievalModel(LitellmModel):
         if not model_name.startswith("openai/"):
             model_name = f"openai/{model_name}"
 
-        return litellm.completion(
+        response = litellm.completion(
             model=model_name,
             api_base=api_base,
             api_key=api_key,
@@ -164,6 +165,9 @@ class RetrievalModel(LitellmModel):
             timeout=model_kwargs.get("timeout"),
             drop_params=model_kwargs.get("drop_params", True),
         )
+
+        self._record_token_usage(response)
+        return response
 
     def _parse_actions(self, response) -> list[dict]:
         """

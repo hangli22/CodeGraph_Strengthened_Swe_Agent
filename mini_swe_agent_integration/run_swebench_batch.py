@@ -326,6 +326,24 @@ def load_completed_ids(output_dir: str) -> set[str]:
         return set()
     return set(json.loads(open(preds_path, encoding="utf-8").read()).keys())
 
+def get_agent_token_usage(agent) -> dict:
+    if agent is None:
+        return {}
+
+    model_obj = getattr(agent, "model", None)
+    if model_obj is None:
+        return {}
+
+    getter = getattr(model_obj, "get_token_usage", None)
+    if getter is None:
+        return {}
+
+    try:
+        return getter()
+    except Exception:
+        logger.warning("读取 token_usage 失败", exc_info=True)
+        return {}
+
 def process_instance(
     instance: dict,
     mode: str,
@@ -526,9 +544,9 @@ def process_instance(
 
         else:
             from mini_swe_agent_integration.baseline_agent import BaselineAgent
-            from minisweagent.models.litellm_model import LitellmModel
+            from mini_swe_agent_integration.token_counting_model import TokenCountingLitellmModel
 
-            model = LitellmModel(
+            model = TokenCountingLitellmModel(
                 model_name=model_name,
                 model_kwargs=model_kwargs,
                 cost_tracking="ignore_errors",
@@ -606,6 +624,8 @@ def process_instance(
 
     finally:
         try:
+            token_usage = get_agent_token_usage(agent)
+
             agent.save(
                 traj_path,
                 {
@@ -614,6 +634,7 @@ def process_instance(
                         "submission": submission,
                         "mode": mode,
                         "env_info": env_info,
+                        "main_agent_tokens": token_usage,
                         **extra_info,
                     },
                     "instance_id": instance_id,
@@ -632,6 +653,7 @@ def process_instance(
 
     elapsed = time.perf_counter() - t0
     retrieval_stats = getattr(agent, "retrieval_call_counts", {}) if agent is not None else {}
+    token_usage = get_agent_token_usage(agent)
 
     summary = {
         "instance_id": instance_id,
@@ -639,6 +661,9 @@ def process_instance(
         "exit_status": exit_status,
         "n_steps": getattr(agent, "n_calls", 0) if agent is not None else 0,
         "cost": getattr(agent, "cost", 0.0) if agent is not None else 0.0,
+        "main_agent_tokens": token_usage,
+        "auxiliary_llm_tokens": {},
+        "embedding_stats": {},
         "elapsed_s": round(elapsed, 1),
         "retrieval_stats": retrieval_stats,
         "has_patch": bool(submission and submission.strip()),
@@ -646,11 +671,12 @@ def process_instance(
     }
 
     logger.info(
-        "[%s] 完成 | exit=%s steps=%d cost=$%.4f elapsed=%.0fs patch=%s retrieval=%s env=%s",
+        "[%s] 完成 | exit=%s steps=%d cost=$%.4f tokens=%s elapsed=%.0fs patch=%s retrieval=%s env=%s",
         instance_id,
         summary["exit_status"],
         summary["n_steps"],
         summary["cost"],
+        token_usage,
         elapsed,
         summary["has_patch"],
         retrieval_stats,

@@ -4,6 +4,11 @@
 
 > **安全提醒**  
 > 不建议在文档中保存真实 API Key。请将下文中的占位符替换为你自己的密钥，或仅通过本机环境变量配置。
+source后要conda activate
+环境变量保存在专门的文件中
+pip hf-cache docker要配置镜像
+还要安装swebench(文档漏掉了)
+docker内部pip要使用镜像
 
 ---
 
@@ -251,7 +256,9 @@ source ~/.bashrc
 ```bash
 conda create -n sweagent python=3.11 -y
 conda activate sweagent
+
 ```
+以及记得安装pip
 
 验证：
 
@@ -773,6 +780,9 @@ PY
 - [ ] Docker 镜像 `sweagent-multipy:latest` 已构建
 - [ ] `--slice` 使用英文冒号，例如 `20:21`
 
+
+另外还有锁机制
+以下是一些可能出现的问题
 
 一、预防 GitHub raw requirements 问题
 1. 给 SWE-bench harness 打缓存补丁
