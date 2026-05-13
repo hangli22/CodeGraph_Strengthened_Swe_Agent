@@ -369,7 +369,6 @@ def process_instance(
     logger.info("[%s] 开始处理 (mode=%s)", instance_id, mode)
     t0 = time.perf_counter()
 
-
     llm_config = resolve_llm_config(
         llm_backend=llm_backend,
         model_name=model_name,
@@ -417,29 +416,25 @@ def process_instance(
     if mode == "retrieval":
         os.environ["CODE_GRAPH_CACHE_DIR"] = instance_cache_dir
         os.environ["SWE_INSTANCE_ID"] = instance_id
-        os.environ["SWE_ISSUE_TEXT"] = instance.get("problem_statement", "")
-        try:
-            from code_graph_retriever.issue_focus import ensure_issue_focus_for_instance
 
-            focus = ensure_issue_focus_for_instance(
-                cache_dir=instance_cache_dir,
-                instance_id=instance_id,
-                issue_text=instance["problem_statement"],
-                api_key=api_key,
-                model=llm_config["issue_focus_model"],
-                llm_backend=llm_config["llm_backend"],
-                force=False,
-            )
+        # Ablation: disable issue_focus completely.
+        #
+        # 原版这里会：
+        #   1. 设置 SWE_ISSUE_TEXT
+        #   2. 调用 ensure_issue_focus_for_instance()
+        #   3. 生成/读取 issue_focus.json
+        #   4. 提供 exact_symbols / file_hints / bm25_queries 给后续检索
+        #
+        # 本消融实验要求去掉 BM25 + issue_focus，因此不要设置 SWE_ISSUE_TEXT，
+        # 也不要调用 ensure_issue_focus_for_instance。
+        os.environ["SWE_DISABLE_ISSUE_FOCUS"] = "1"
+        os.environ["SWE_DISABLE_BM25"] = "1"
+        os.environ.pop("SWE_ISSUE_TEXT", None)
 
-            logger.info(
-                "[%s] issue focus 就绪: symbols=%d files=%d bm25_queries=%d",
-                instance_id,
-                len(focus.exact_symbols),
-                len(focus.file_hints),
-                len(focus.bm25_queries),
-            )
-        except Exception as e:
-            logger.warning("[%s] issue focus 抽取失败，将继续运行: %s", instance_id, e)
+        logger.info(
+            "[%s] ablation enabled: BM25 disabled, issue_focus disabled",
+            instance_id,
+        )
 
     if mode == "retrieval":
         try:
@@ -592,7 +587,9 @@ def process_instance(
 
         logger.info(
             "[%s] raw exit_status=%r submission_len=%d",
-            instance_id, exit_status, len(submission or ""),
+            instance_id,
+            exit_status,
+            len(submission or ""),
         )
 
         # submission 为空时用宿主机 git diff 兜底。

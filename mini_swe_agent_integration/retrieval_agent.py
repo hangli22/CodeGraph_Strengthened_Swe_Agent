@@ -304,6 +304,16 @@ class RetrievalAgent(DefaultAgent):
         tool_name = action["tool_name"]
         args = action.get("args", {})
 
+        # Ablation guard:
+        # search_bm25 should not be visible in tool schema, but keep this fallback
+        # in case an old prompt / stale trajectory / hallucinated tool call invokes it.
+        if tool_name == "search_bm25":
+            return self._make_output(
+                "[policy error] search_bm25 is disabled in this ablation. "
+                "Use search_hybrid, search_semantic, search_structural, deepen_file, or bash.",
+                returncode=1,
+            )
+
         logger.info("检索工具调用: %s(%s)", tool_name, args)
         t0 = time.perf_counter()
 

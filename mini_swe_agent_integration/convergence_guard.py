@@ -232,7 +232,7 @@ class ConvergenceGuard:
             stage = (
                 "【强制收敛提醒】已经到达 30 步。\n"
                 "从现在开始禁止 broad search。\n"
-                "不要再调用 search_hybrid/search_bm25/search_semantic/search_structural/deepen_file。\n"
+                "不要再调用 search_hybrid/search_semantic/search_structural/deepen_file。\n"
                 "不要再 broad grep，不要再整文件读取。\n"
                 "如果已经找到直接报错位置、相关测试或核心函数，必须开始准备最小修改。"
             )
@@ -484,7 +484,6 @@ class ConvergenceGuard:
             tool_name = action.get("tool_name")
             return tool_name in {
                 "search_hybrid",
-                "search_bm25",
                 "search_semantic",
                 "search_structural",
                 "deepen_file",
@@ -500,7 +499,6 @@ class ConvergenceGuard:
         if "tool_name" in action:
             return action.get("tool_name") in {
                 "search_hybrid",
-                "search_bm25",
                 "search_semantic",
                 "search_structural",
                 "deepen_file",
