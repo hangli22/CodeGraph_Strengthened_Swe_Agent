@@ -40,7 +40,8 @@ Format error: {{error}}
 
 You MUST include exactly one valid tool call in your response.
 Do not include multiple tool calls.
-If you include multiple tool calls, only the first valid tool call will be executed and all later tool calls will be ignored.
+Do not include multiple tool calls.
+If you include multiple tool calls, only the first valid tool call will be executed and all later tool calls will be discarded from the conversation history.
 Available tools: bash, search_hybrid, deepen_file, search_semantic, search_structural.
 
 - Use `bash` for ALL shell operations: read files, edit files, run scripts, git commands, and submit.
@@ -168,17 +169,13 @@ class RetrievalModel(LitellmModel):
         """
         从模型响应中解析 tool_calls，返回统一格式的 action 列表。
 
-        返回格式：
-        bash 工具:
-            {"command": str, "tool_call_id": str}
-
-        检索工具:
-            {"tool_name": str, "args": dict, "tool_call_id": str}
-
-        宽松策略：
-        - assistant content 非空但 tool_calls 合法时，不报错；
-        - 一旦存在 tool_calls，就清空 response 里的 assistant content；
-        - 如果返回多个 tool_calls，只执行第一个合法 tool call，忽略后续 tool call。
+        重要修复：
+        - 当前 agent 策略是每轮只执行第一个合法 tool call；
+        - 因此必须同步裁剪原始 assistant message 中的 tool_calls；
+        - 否则上下文里会出现 assistant 有多个 tool_calls，
+        但后续只有一个 tool response 的非法 OpenAI messages 结构，
+        触发：
+        "An assistant message with 'tool_calls' must be followed by tool messages..."
         """
         msg = response.choices[0].message
         tool_calls = msg.tool_calls or []
@@ -187,9 +184,6 @@ class RetrievalModel(LitellmModel):
             raise self._format_error(
                 "No tool calls found. You MUST call exactly one tool per turn."
             )
-
-        # 关键：清洗原始 API response，避免 extra.response 里保留 assistant content。
-        self._clear_response_assistant_content(response)
 
         first_error = ""
 
@@ -201,7 +195,13 @@ class RetrievalModel(LitellmModel):
                     first_error = self._extract_format_error_text(e)
                 continue
 
-            # 只执行第一个合法 tool call。
+            # 清空 assistant content，避免 content + tool_calls 污染上下文。
+            self._clear_response_assistant_content(response)
+
+            # 关键修复：只保留实际会执行的这个 tool_call。
+            # 因为后续只会为 action["tool_call_id"] 生成一个 tool response。
+            self._keep_only_response_tool_call(response, tc)
+
             return [action]
 
         raise self._format_error(
@@ -335,6 +335,64 @@ class RetrievalModel(LitellmModel):
                 cls._clear_assistant_content(msg)
         except Exception:
             pass
+
+    @staticmethod
+    def _set_message_tool_calls(msg, tool_calls) -> None:
+        """
+        设置 message-like 对象的 tool_calls 字段。
+
+        兼容：
+        - LiteLLM/OpenAI object style: msg.tool_calls
+        - dict style: msg["tool_calls"]
+        """
+        if msg is None:
+            return
+
+        try:
+            msg.tool_calls = tool_calls
+        except Exception:
+            pass
+
+        try:
+            msg["tool_calls"] = tool_calls
+        except Exception:
+            pass
+
+
+    @classmethod
+    def _keep_only_response_tool_call(cls, response, selected_tool_call) -> None:
+        """
+        只保留实际执行的 selected_tool_call。
+
+        为什么必须做：
+        - _parse_actions 只返回一个 action；
+        - format_observation_messages 只会为这个 action 生成一个 tool response；
+        - 如果原始 assistant message 仍保留多个 tool_calls，
+        下一次请求会因为缺少其他 tool_call_id 的 tool response 而 400。
+        """
+        if response is None or selected_tool_call is None:
+            return
+
+        selected = [selected_tool_call]
+
+        # object style: response.choices[0].message.tool_calls
+        try:
+            choices = getattr(response, "choices", None)
+            if choices:
+                msg = choices[0].message
+                cls._set_message_tool_calls(msg, selected)
+        except Exception:
+            pass
+
+        # dict style: response["choices"][0]["message"]["tool_calls"]
+        try:
+            choices = response.get("choices", [])
+            if choices:
+                msg = choices[0].get("message")
+                cls._set_message_tool_calls(msg, selected)
+        except Exception:
+            pass
+
 
     def format_observation_messages(self, message, outputs, template_vars=None):
         """
