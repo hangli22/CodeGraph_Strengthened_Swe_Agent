@@ -1,183 +1,98 @@
-# CodeGraph Strengthened SWE-Agent 环境配置指南
+# CodeGraph Strengthened SWE-Agent：Ubuntu 22.04 云服务器环境配置指南（server4 实战更新版）
 
-本文档用于在 **Windows + WSL2 + Docker Desktop + Ubuntu 22.04** 环境下配置并运行 `CodeGraph_Strengthened_Swe_Agent` 项目。
+本文档用于在 **Ubuntu 22.04 云服务器** 上配置并运行 `CodeGraph_Strengthened_Swe_Agent` 项目。本文特别补充了 server4 配置过程中实际遇到的问题：
 
-> **安全提醒**  
-> 不建议在文档中保存真实 API Key。请将下文中的占位符替换为你自己的密钥，或仅通过本机环境变量配置。
-source后要conda activate
-环境变量保存在专门的文件中
-pip hf-cache docker要配置镜像
-还要安装swebench(文档漏掉了)
-docker内部pip要使用镜像
+- SSH 私钥访问方式；
+- 4 个并行进程对应 4 份代码目录；
+- apt / pip / Hugging Face / Docker 镜像源配置；
+- Dockerfile 内部 apt 源不能一开始用 `https` 的 CA 证书问题；
+- Dockerfile 中 wheelhouse 预下载多个 `numpy` / `scipy` 固定版本导致 pip 依赖解析冲突的问题；
+- SWE-bench raw requirements 本地缓存补丁；
+- Lite / Verified 数据集离线缓存；
+- smoke test 与正式运行前检查。
 
----
-
-## 1. Windows 侧：安装 WSL2 + Ubuntu 22.04
-
-在 **管理员 PowerShell** 中执行：
-
-```powershell
-wsl --install -d Ubuntu-22.04
-```
-
-如果已经安装过 WSL，可以检查：
-
-```powershell
-wsl -l -v
-```
-
-期望看到类似输出：
-
-```text
-NAME            STATE     VERSION
-Ubuntu-22.04    Running   2
-```
-
-如果不是 WSL2，可以执行：
-
-```powershell
-wsl --set-version Ubuntu-22.04 2
-```
-
-现代 Windows 可以使用 `wsl --install` 安装 WSL，新安装的 Linux 发行版默认使用 WSL2。也可以用 `wsl -l -v` 检查版本。
-
-如果是旧版 Windows，可能需要手动开启相关功能：
-
-```powershell
-dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
-dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
-```
-
-然后重启电脑。
-
-验证：
-
-```powershell
-wsl --status
-wsl -l -v
-```
+> 安全提醒：不要把真实 API Key 写入文档或发给别人。真实 key 只保存在服务器本机环境变量文件中。
 
 ---
 
-## 2. Windows 侧：安装 Docker Desktop，并启用 WSL2 后端
+## 0. server4 基本信息与目录规范
 
-安装 **Docker Desktop for Windows**。
-
-安装完成后，打开 Docker Desktop。
-
-### 2.1 配置 Docker 镜像源
-
-进入：
+server4：
 
 ```text
-Settings → Docker Engine
+IP: 47.96.149.209
+OS: Ubuntu 22.04
+SSH key: ~/.ssh/sweagent_server4.pem
 ```
 
-将配置修改为：
-
-```json
-{
-  "registry-mirrors": [
-    "https://docker.1panel.live",
-    "https://hub.rat.dev",
-    "https://dockerpull.org"
-  ]
-}
-```
-
-然后点击：
-
-```text
-Apply & Restart
-```
-
-### 2.2 修改 Docker 磁盘位置
-
-如果 D 盘空间更充足，可以进入：
-
-```text
-Settings → Resources → Advanced
-```
-
-将：
-
-```text
-Disk image location
-```
-
-修改到 D 盘。
-
-### 2.3 启用 WSL2 后端
-
-进入：
-
-```text
-Settings → General
-```
-
-勾选：
-
-```text
-Use WSL 2 based engine
-```
-
-然后进入：
-
-```text
-Settings → Resources → WSL Integration
-```
-
-开启：
-
-```text
-Ubuntu-22.04
-```
-
-最后点击：
-
-```text
-Apply & Restart
-```
-
-Docker 官方文档建议 Docker Desktop on Windows 使用 WSL2 based engine，并在 Settings 中启用 WSL integration。
-
-在 WSL 中验证：
+本地 WSL 中先复制私钥：
 
 ```bash
-docker version
-docker info
-docker run --rm hello-world
+mkdir -p ~/.ssh
+cp "/mnt/c/Users/hl-pc/Desktop/毕设/CodeAgent/sweagent_server4.pem" ~/.ssh/sweagent_server4.pem
+chmod 600 ~/.ssh/sweagent_server4.pem
 ```
 
-成功时，`hello-world` 会打印 Docker 测试信息。
+以后所有 SSH / SCP 都要带 `-i`：
 
-> **注意**  
-> 不建议在 WSL 中单独执行 `apt install docker.io`。如果已经使用 Docker Desktop 的 WSL2 后端，在 WSL distro 内另装 Docker Engine / CLI 可能造成冲突。
+```bash
+ssh -i ~/.ssh/sweagent_server4.pem root@47.96.149.209
+```
+
+```bash
+scp -i ~/.ssh/sweagent_server4.pem local_file root@47.96.149.209:/root/
+```
+
+server4 上准备 4 份代码，用于 4 个进程并行，编号必须严格对应：
+
+```text
+process1 -> /root/CodeAgent1/files1
+process2 -> /root/CodeAgent2/files2
+process3 -> /root/CodeAgent3/files3
+process4 -> /root/CodeAgent4/files4
+```
+
+不要混用类似 `/root/CodeAgent1/files2` 这种不匹配目录。
 
 ---
 
-## 3. WSL 内：安装基础系统工具
-
-进入 Ubuntu 22.04：
-
-```powershell
-wsl -d Ubuntu-22.04
-```
-
-更新 apt：
+## 1. 登录后检查系统资源
 
 ```bash
-sudo apt update
+cat /etc/os-release
+uname -a
+whoami
+pwd
+df -h
+free -h
+nproc
+ping -c 3 github.com
+ping -c 3 mirrors.tuna.tsinghua.edu.cn
 ```
 
-安装基础工具：
+server4 实测资源：约 99G 磁盘、14G 内存、4 核 CPU，可用于 4 个轻量进程，但首次 Docker / SWE-bench 镜像拉取时仍建议保守运行。
+
+---
+
+## 2. 配置 apt 镜像并安装基础工具
+
+云服务器宿主机可以直接使用清华 apt 镜像。
 
 ```bash
-sudo apt install -y \
+cp /etc/apt/sources.list /etc/apt/sources.list.bak.$(date +%Y%m%d_%H%M%S)
+
+cat > /etc/apt/sources.list <<'EOF_APT'
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ jammy main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ jammy-updates main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ jammy-backports main restricted universe multiverse
+deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu/ jammy-security main restricted universe multiverse
+EOF_APT
+
+apt update
+apt install -y \
   git curl wget ca-certificates build-essential \
   gcc g++ make pkg-config \
-  unzip zip tree vim nano \
-  jq \
+  unzip zip tree vim nano jq \
   software-properties-common
 ```
 
@@ -188,177 +103,211 @@ git --version
 curl --version
 gcc --version
 make --version
-docker version
+jq --version
 ```
 
 ---
 
-## 4. WSL 内：安装 Miniforge / conda / mamba
+## 3. 用镜像安装 Miniforge
 
-建议使用 **Miniforge**，不建议使用 Anaconda。
-
-Miniforge 是 conda-forge 社区维护的轻量发行版，官方仓库提供 Linux x86_64 安装脚本。
-
-执行：
+不要直接从 GitHub 下载 Miniforge，容易慢。使用清华镜像：
 
 ```bash
 cd ~
-wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+rm -f Miniforge3-Linux-x86_64.sh Miniforge3-Linux-x86_64.sh.*
+
+wget -O Miniforge3-Linux-x86_64.sh \
+  https://mirrors.tuna.tsinghua.edu.cn/github-release/conda-forge/miniforge/LatestRelease/Miniforge3-Linux-x86_64.sh
+
+ls -lh Miniforge3-Linux-x86_64.sh
 bash Miniforge3-Linux-x86_64.sh
 ```
 
-安装过程中，如果出现：
+安装时：
 
 ```text
-Do you wish to update your shell profile?
+Do you accept the license terms? -> yes
+Do you wish to update your shell profile? -> yes
 ```
 
-选择：
-
-```text
-yes
-```
-
-然后重新打开 WSL，或者执行：
+安装后：
 
 ```bash
 source ~/.bashrc
-```
-
-验证：
-
-```bash
 conda --version
 mamba --version
+```
+
+> 注意：每次执行 `source ~/.bashrc` 后，如果要继续使用项目环境，都要重新执行 `conda activate sweagent`。
+
+---
+
+## 4. 创建 Python 环境
+
+```bash
+conda create -n sweagent python=3.11 pip -y
+conda activate sweagent
+
+python --version
+python -m pip --version
 which python
 ```
 
-如果出现：
+期望 Python 为 3.11，例如：
 
 ```text
-conda: command not found
-```
-
-通常是 shell 没刷新。可以执行：
-
-```bash
-source ~/miniforge3/etc/profile.d/conda.sh
-conda init bash
-source ~/.bashrc
+/root/miniforge3/envs/sweagent/bin/python
 ```
 
 ---
 
-## 5. 创建项目 Python 环境
+## 5. 配置 pip 镜像与统一环境变量文件
 
-建议宿主 WSL 的项目运行环境使用 Python 3.11：
+### 5.1 pip 镜像
 
 ```bash
-conda create -n sweagent python=3.11 -y
-conda activate sweagent
+mkdir -p ~/.pip
 
+cat > ~/.pip/pip.conf <<'EOF_PIP'
+[global]
+index-url = https://pypi.tuna.tsinghua.edu.cn/simple
+trusted-host = pypi.tuna.tsinghua.edu.cn
+timeout = 120
+retries = 5
+disable-pip-version-check = true
+EOF_PIP
 ```
-以及记得安装pip
+
+### 5.2 单独环境变量文件
+
+不要把项目环境变量散落在很多地方，统一写到 `~/.codeagent_env`：
+
+```bash
+cat > ~/.codeagent_env <<'EOF_ENV'
+# ===== CodeAgent / SWE-agent environment =====
+
+# Python UTF-8
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
+export PYTHONUNBUFFERED=1
+
+# Hugging Face cache
+export HF_HOME="$HOME/CodeAgent/hf_cache"
+
+# Hugging Face mirror
+export HF_ENDPOINT=https://hf-mirror.com
+
+# pip behavior
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_DEFAULT_TIMEOUT=120
+export PIP_RETRIES=5
+
+# SWE-bench raw requirements cache
+export SWEBENCH_RAW_REQ_CACHE_DIR="$HOME/CodeAgent/swebench_raw_req_cache"
+
+# LLM / embedding API keys. Replace placeholders locally.
+export UNI_API_KEY="你的_UNI_API_KEY"
+export DASHSCOPE_API_KEY="你的_DASHSCOPE_API_KEY"
+export DEEPSEEK_API_KEY="你的_DEEPSEEK_API_KEY"
+EOF_ENV
+```
+
+挂到 `~/.bashrc`：
+
+```bash
+grep -q 'source ~/.codeagent_env' ~/.bashrc || cat >> ~/.bashrc <<'EOF_BASHRC'
+
+# CodeAgent environment variables
+source ~/.codeagent_env
+EOF_BASHRC
+
+source ~/.bashrc
+conda activate sweagent
+```
 
 验证：
 
 ```bash
-python --version
-pip --version
-which python
+python -m pip config list
+python - <<'PY'
+import os
+for k in [
+    "UNI_API_KEY", "DASHSCOPE_API_KEY", "DEEPSEEK_API_KEY",
+    "HF_HOME", "HF_ENDPOINT", "SWEBENCH_RAW_REQ_CACHE_DIR",
+]:
+    print(k, "SET" if os.environ.get(k) else "NOT SET")
+PY
 ```
 
-期望输出类似：
-
-```text
-Python 3.11.x
-/home/<user>/miniforge3/envs/sweagent/bin/python
-```
+只确认 `SET / NOT SET`，不要输出真实 key。
 
 ---
 
-## 6. 获取项目代码
-
-如果从 GitHub 克隆：
+## 6. 克隆 4 份代码
 
 ```bash
-mkdir -p ~/CodeAgent1
-cd ~/CodeAgent1
-git clone https://github.com/hangli22/CodeGraph_Strengthened_Swe_Agent.git files1
-cd files1
-```
-
-如果从 Windows 复制项目，建议复制到 WSL 文件系统：
-
-```bash
-mkdir -p ~/CodeAgent/files
-```
-
-> **建议**  
-> 不要长期在 `/mnt/c/Users/...` 下面跑批量实验。  
-> 推荐使用 WSL 原生路径，例如 `~/CodeAgent/files`。
-
-验证项目结构：
-
-```bash
-ls
-```
-
-你应该看到类似：
-
-```text
-Dockerfile.sweagent-multipy
-requirements.txt
-mini_swe_agent_integration
-mini-swe-agent
-code_graph_builder
-code_graph_retriever
-```
-
----
-
-## 7. 安装项目 Python 依赖
-
-进入项目根目录：
-
-```bash
-cd ~/CodeAgent/files
+source ~/.bashrc
 conda activate sweagent
+
+for i in 1 2 3 4; do
+  mkdir -p /root/CodeAgent${i}
+
+  if [ -d /root/CodeAgent${i}/files${i}/.git ]; then
+    echo "EXISTS: /root/CodeAgent${i}/files${i}"
+  else
+    echo "CLONE: /root/CodeAgent${i}/files${i}"
+    git clone https://github.com/hangli22/CodeGraph_Strengthened_Swe_Agent.git /root/CodeAgent${i}/files${i}
+  fi
+done
 ```
 
-升级基础构建工具：
+检查 4 份代码：
 
 ```bash
-python -m pip install -U pip setuptools wheel
+for i in 1 2 3 4; do
+  echo
+  echo "===== CodeAgent${i}/files${i} ====="
+  cd /root/CodeAgent${i}/files${i}
+  git branch --show-current
+  git log -1 --oneline
+  git status --short
+done
 ```
 
-安装项目依赖：
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-建议安装本地 `mini-swe-agent`，否则容易出现：
+server4 实测 4 份代码均为：
 
 ```text
-ModuleNotFoundError: No module named 'minisweagent'
+main
+20cf766 增强了多func call解决
 ```
 
-安装命令：
+---
+
+## 7. 安装项目依赖
+
+4 份代码共享同一个 conda 环境，所以通用依赖装一次即可。先在 `files1` 安装：
 
 ```bash
+source ~/.bashrc
+conda activate sweagent
+
+cd /root/CodeAgent1/files1
+
+python -m pip install -U pip setuptools wheel
+python -m pip install -r requirements.txt
+python -m pip install swebench
 python -m pip install -e ./mini-swe-agent
 ```
 
-验证关键 import：
+验证：
 
 ```bash
 python - <<'PY'
 import sys
-print(sys.executable)
+print("python:", sys.executable)
 
 import minisweagent
-print("minisweagent ok:", minisweagent.__file__)
+print("minisweagent:", minisweagent.__file__)
 
 import datasets
 print("datasets ok")
@@ -366,105 +315,362 @@ print("datasets ok")
 import litellm
 print("litellm ok")
 
+import swebench
+print("swebench ok")
+
 import networkx
 print("networkx ok")
 PY
 ```
 
-如果 `minisweagent` 导入失败，优先检查：
+然后给 `files2/files3/files4` 也安装本地 editable 的 mini-swe-agent：
 
 ```bash
-find . -path "*minisweagent*" -maxdepth 5
-python -m pip list | grep -i swe
+source ~/.bashrc
+conda activate sweagent
+
+for i in 2 3 4; do
+  echo
+  echo "===== install editable mini-swe-agent for files${i} ====="
+  cd /root/CodeAgent${i}/files${i}
+  python -m pip install -e ./mini-swe-agent
+done
+```
+
+检查最终指向：
+
+```bash
+python - <<'PY'
+import minisweagent
+print(minisweagent.__file__)
+PY
+```
+
+由于同一个 conda 环境只能有一个 editable 指向，最后通常会指向 `files4`。如果 4 份代码 commit 一致，这是可以接受的。如果后续单独改某一份代码的 `mini-swe-agent`，需要进入对应目录重新执行：
+
+```bash
+python -m pip install -e ./mini-swe-agent
 ```
 
 ---
 
-## 8. 配置 API Key
+## 8. 安装 Docker Engine 与配置 Docker registry mirrors
 
-项目至少需要两个环境变量：
-
-| 环境变量 | 用途 |
-|---|---|
-| `UNI_API_KEY` | Uni-API / OpenAI-compatible LLM 调用 |
-| `DASHSCOPE_API_KEY` | DashScope embedding 调用 |
-
-建议写入 `~/.bashrc`：
-
-```bash
-cat >> ~/.bashrc <<'EOF'
-
-# ===== CodeAgent / SWE-agent environment =====
-export UNI_API_KEY="<your-uni-api-key>"
-export DASHSCOPE_API_KEY="<your-dashscope-api-key>"
-
-# Python UTF-8
-export PYTHONUTF8=1
-export PYTHONIOENCODING=utf-8
-export PYTHONUNBUFFERED=1
-
-# Hugging Face cache location
-export HF_HOME="$HOME/.cache/huggingface"
-
-# pip behavior
-export PIP_DISABLE_PIP_VERSION_CHECK=1
-export PIP_DEFAULT_TIMEOUT=60
-export PIP_RETRIES=3
-
-# Hugging Face offline mode.
-# 注意：只有确认 SWE-bench_Lite 已经下载缓存后，再取消下面两行注释。
-# export HF_DATASETS_OFFLINE=1
-# export HF_HUB_OFFLINE=1
-EOF
-```
-
-刷新配置：
+云服务器上使用 Docker Engine，不是 Docker Desktop。
 
 ```bash
 source ~/.bashrc
+conda activate sweagent
+
+apt update
+apt install -y docker.io
+
+systemctl enable docker
+systemctl start docker
+
+docker version
+```
+
+配置 Docker 镜像源：
+
+```bash
+mkdir -p /etc/docker
+
+cp /etc/docker/daemon.json /etc/docker/daemon.json.bak.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
+
+cat > /etc/docker/daemon.json <<'JSON'
+{
+  "registry-mirrors": [
+    "https://docker.1ms.run",
+    "https://docker.xuanyuan.me",
+    "https://dockerproxy.com",
+    "https://docker.1panel.live"
+  ],
+  "features": {
+    "buildkit": true
+  }
+}
+JSON
+
+systemctl daemon-reload
+systemctl restart docker
+
+docker info | sed -n '/Registry Mirrors/,+10p'
+```
+
+---
+
+## 9. 重要：修复 Dockerfile 内部 apt 镜像的 CA 证书问题
+
+### 9.1 问题现象
+
+如果在 Dockerfile 里一开始把 apt 源替换成：
+
+```text
+https://mirrors.tuna.tsinghua.edu.cn/ubuntu
+```
+
+构建时可能报错：
+
+```text
+No system certificates available. Try installing ca-certificates.
+Certificate verification failed: The certificate is NOT trusted.
+Could not handshake: Error in the certificate verification.
+E: Unable to locate package ca-certificates
+E: Unable to locate package curl
+E: Unable to locate package git
+```
+
+### 9.2 根本原因
+
+`ubuntu:22.04` 基础镜像在最开始阶段可能还没有可用的 `ca-certificates`。如果 apt 源一开始就是 `https`，apt 在下载包列表时需要验证 TLS 证书，但证书包还没安装，于是 HTTPS 握手失败。包列表更新失败后，后续就会出现 `Unable to locate package`。
+
+所以：**Dockerfile 内部 apt 源在安装 ca-certificates 之前，应该先使用 http 镜像，而不是 https 镜像。**
+
+### 9.3 正确补丁
+
+进入 `files1`：
+
+```bash
+source ~/.bashrc
+conda activate sweagent
+
+cd /root/CodeAgent1/files1
+cp Dockerfile.sweagent-multipy Dockerfile.sweagent-multipy.bak.aptmirror.$(date +%Y%m%d_%H%M%S)
+```
+
+在 `FROM ubuntu:22.04` 后插入或修正为 **http** 清华镜像：
+
+```bash
+python - <<'PY'
+from pathlib import Path
+
+path = Path("Dockerfile.sweagent-multipy")
+text = path.read_text(encoding="utf-8")
+
+marker = "FROM ubuntu:22.04\n"
+insert = r'''
+# Use Tsinghua Ubuntu mirror inside Docker build.
+# Important: use http here, not https.
+# The base ubuntu image may not have ca-certificates before apt install.
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://mirrors.tuna.tsinghua.edu.cn/ubuntu|g; s|http://security.ubuntu.com/ubuntu|http://mirrors.tuna.tsinghua.edu.cn/ubuntu|g' /etc/apt/sources.list
+'''
+
+if "mirrors.tuna.tsinghua.edu.cn/ubuntu" not in text:
+    text = text.replace(marker, marker + insert + "\n", 1)
+else:
+    text = text.replace(
+        "https://mirrors.tuna.tsinghua.edu.cn/ubuntu",
+        "http://mirrors.tuna.tsinghua.edu.cn/ubuntu",
+    )
+
+path.write_text(text, encoding="utf-8")
+print("patched Dockerfile.sweagent-multipy apt mirror to http")
+PY
+```
+
+检查：
+
+```bash
+sed -n '1,25p' Dockerfile.sweagent-multipy
+```
+
+应看到 `http://mirrors.tuna.tsinghua.edu.cn/ubuntu`，不是 `https://...`。
+
+---
+
+## 10. 重要：修复 Dockerfile 中 numpy / scipy 多版本 wheelhouse 下载冲突
+
+### 10.1 问题现象
+
+构建 Docker 镜像时，Dockerfile 如果写成：
+
+```bash
+python -m pip download -d "${wh}" \
+  "numpy==1.21.6" "numpy==1.22.4" "numpy==1.23.5" "numpy==1.24.4"
+```
+
+新版 pip 会把它理解为：在同一个解析环境里同时要求安装多个固定版本的 numpy，于是报错：
+
+```text
+ERROR: Cannot install numpy==1.21.6 and numpy==1.22.4 because these package versions have conflicting dependencies.
+ERROR: ResolutionImpossible
+```
+
+`scipy` 多版本同理：
+
+```text
+ERROR: Cannot install scipy==1.7.3 and scipy==1.8.1 because these package versions have conflicting dependencies.
+```
+
+### 10.2 正确做法
+
+**逐个版本单独 download，并使用 `--no-deps`。** 这样 pip 不会在同一个 resolver 中同时解析多个互斥版本。
+
+在 `Dockerfile.sweagent-multipy` 里把原来的 numpy/scipy 多版本下载块替换为：
+
+```bash
+      for pkg in "numpy==1.21.6" "numpy==1.22.4" "numpy==1.23.5" "numpy==1.24.4"; do \
+        python -m pip download --no-deps -d "${wh}" "$pkg" \
+          || echo "[wheelhouse][warning] ${pkg} download failed for ${pybin}"; \
+      done; \
+      for pkg in "scipy==1.7.3" "scipy==1.8.1" "scipy==1.9.3" "scipy==1.10.1"; do \
+        python -m pip download --no-deps -d "${wh}" "$pkg" \
+          || echo "[wheelhouse][warning] ${pkg} download failed for ${pybin}"; \
+      done; \
+```
+
+可以用以下补丁自动替换：
+
+```bash
+cd /root/CodeAgent1/files1
+cp Dockerfile.sweagent-multipy Dockerfile.sweagent-multipy.bak.wheelhouse.$(date +%Y%m%d_%H%M%S)
+
+python - <<'PY'
+from pathlib import Path
+
+path = Path("Dockerfile.sweagent-multipy")
+text = path.read_text(encoding="utf-8")
+
+old = '''      python -m pip download -d "${wh}" \\
+        "numpy==1.21.6" "numpy==1.22.4" "numpy==1.23.5" "numpy==1.24.4" \\
+        || echo "[wheelhouse][warning] numpy multi-version download partially failed for ${pybin}"; \\
+      python -m pip download -d "${wh}" \\
+        "scipy==1.7.3" "scipy==1.8.1" "scipy==1.9.3" "scipy==1.10.1" \\
+        || echo "[wheelhouse][warning] scipy multi-version download partially failed for ${pybin}"; \\'''
+
+new = '''      for pkg in "numpy==1.21.6" "numpy==1.22.4" "numpy==1.23.5" "numpy==1.24.4"; do \\
+        python -m pip download --no-deps -d "${wh}" "$pkg" \\
+          || echo "[wheelhouse][warning] ${pkg} download failed for ${pybin}"; \\
+      done; \\
+      for pkg in "scipy==1.7.3" "scipy==1.8.1" "scipy==1.9.3" "scipy==1.10.1"; do \\
+        python -m pip download --no-deps -d "${wh}" "$pkg" \\
+          || echo "[wheelhouse][warning] ${pkg} download failed for ${pybin}"; \\
+      done; \\'''
+
+if old not in text:
+    raise SystemExit("ERROR: target block not found; check Dockerfile content around numpy/scipy download")
+
+path.write_text(text.replace(old, new), encoding="utf-8")
+print("patched Dockerfile.sweagent-multipy wheelhouse block")
+PY
+```
+
+检查：
+
+```bash
+grep -n -A14 -B3 "for pkg in.*numpy" Dockerfile.sweagent-multipy
+grep -n -A10 -B3 "for pkg in.*scipy" Dockerfile.sweagent-multipy
+```
+
+应看到 `for pkg in ...` 和 `--no-deps`。
+
+---
+
+## 11. 清理失败构建缓存并重新构建 Docker 镜像
+
+如果 Docker build 中断或失败，先清理：
+
+```bash
+docker builder prune -af
+docker image prune -af
+docker container prune -f
+```
+
+重新构建：
+
+```bash
+source ~/.bashrc
+conda activate sweagent
+
+cd /root/CodeAgent1/files1
+
+docker build \
+  -f Dockerfile.sweagent-multipy \
+  -t sweagent-multipy:latest \
+  .
+```
+
+构建过程中如果看到：
+
+```text
+Get: ... https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu ...
+```
+
+但没有 `Certificate verification failed`，说明 CA 证书已经正常，只是 deadsnakes PPA 下载慢，可以继续等。
+
+构建成功应看到：
+
+```text
+Successfully built ...
+Successfully tagged sweagent-multipy:latest
 ```
 
 验证：
 
 ```bash
-python - <<'PY'
-import os
+docker images | grep sweagent-multipy
 
-for k in [
-    "UNI_API_KEY",
-    "DASHSCOPE_API_KEY",
-    "PYTHONUTF8",
-    "PYTHONIOENCODING",
-    "HF_HOME",
-]:
-    print(k, "SET" if os.environ.get(k) else "NOT SET")
-PY
+docker run --rm sweagent-multipy:latest bash -lc '
+python3.8 --version || true
+python3.9 --version || true
+python3.10 --version || true
+python3.11 --version || true
+git --version
+gcc --version
+make --version
+ls -R /opt/wheelhouse 2>/dev/null | head -80 || true
+'
+```
+
+挂载测试：
+
+```bash
+mkdir -p /tmp/docker_mount_test
+echo hello > /tmp/docker_mount_test/a.txt
+
+docker run --rm \
+  -v /tmp/docker_mount_test:/workspace/repo \
+  -w /workspace/repo \
+  sweagent-multipy:latest \
+  bash -lc 'pwd && ls -la && cat a.txt'
+```
+
+期望：
+
+```text
+/workspace/repo
+a.txt
+hello
 ```
 
 ---
 
-## 9. Hugging Face / SWE-bench 数据集准备
+## 12. Hugging Face 镜像、Lite / Verified 缓存与 offline 模式
 
-进入项目目录：
-
-```bash
-cd ~/CodeAgent/files
-conda activate sweagent
-```
-
-建议将 Hugging Face 缓存路径固定到项目外的统一目录：
+先在线使用 HF 镜像下载：
 
 ```bash
-cat >> ~/.bashrc <<'EOF'
-
-# Hugging Face cache for SWE-bench
-export HF_HOME="$HOME/CodeAgent/hf_cache"
-EOF
-
 source ~/.bashrc
+conda activate sweagent
+
+mkdir -p "$HF_HOME" "$SWEBENCH_RAW_REQ_CACHE_DIR"
+cd /root/CodeAgent1/files1
+
+unset HF_DATASETS_OFFLINE
+unset HF_HUB_OFFLINE
+export HF_ENDPOINT=https://hf-mirror.com
 ```
 
-在线预下载 SWE-bench Lite：
+清理可能残留的锁文件和不完整缓存：
+
+```bash
+find "$HF_HOME" -name "*.lock" -type f -delete
+find "$HF_HOME" -name "*.incomplete" -type f -delete
+find "$HF_HOME" -name "tmp*" -type d -prune -exec rm -rf {} + 2>/dev/null || true
+```
+
+下载 Lite：
 
 ```bash
 python - <<'PY'
@@ -476,14 +682,14 @@ print("first:", ds[0]["instance_id"])
 PY
 ```
 
-期望输出：
+期望：
 
 ```text
 len: 300
 first: astropy__astropy-12907
 ```
 
-验证离线可用：
+验证 Lite 离线：
 
 ```bash
 HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1 python - <<'PY'
@@ -495,343 +701,427 @@ print("first:", ds[0]["instance_id"])
 PY
 ```
 
-成功后，以后运行脚本时可以开启离线模式。
-
-将下面两行写入 `~/.bashrc`：
+下载 Verified：
 
 ```bash
-export HF_DATASETS_OFFLINE=1
-export HF_HUB_OFFLINE=1
+unset HF_DATASETS_OFFLINE
+unset HF_HUB_OFFLINE
+export HF_ENDPOINT=https://hf-mirror.com
+
+python - <<'PY'
+from datasets import load_dataset
+
+ds = load_dataset("princeton-nlp/SWE-bench_Verified", split="test")
+print("len:", len(ds))
+print("first:", ds[0]["instance_id"])
+PY
 ```
 
----
-
-## 10. 构建 Docker 镜像 `sweagent-multipy:latest`
-
-进入项目目录：
-
-```bash
-cd ~/CodeAgent/files
-```
-
-构建镜像：
-
-```bash
-docker build \
-  -f Dockerfile.sweagent-multipy \
-  -t sweagent-multipy:latest \
-  .
-```
-
-验证镜像存在：
-
-```bash
-docker images | grep sweagent-multipy
-```
-
-验证镜像中的多 Python：
-
-```bash
-docker run --rm sweagent-multipy:latest bash -lc '
-python3.8 --version || true
-python3.9 --version || true
-python3.10 --version || true
-python3.11 --version || true
-'
-```
-
-验证基础工具：
-
-```bash
-docker run --rm sweagent-multipy:latest bash -lc '
-git --version
-gcc --version
-make --version
-'
-```
-
-如果 Dockerfile 中准备了 wheelhouse，可以验证：
-
-```bash
-docker run --rm sweagent-multipy:latest bash -lc '
-ls -R /opt/wheelhouse 2>/dev/null | head -80 || echo "no wheelhouse"
-'
-```
-
----
-
-## 11. 验证 Docker Desktop + WSL Volume Mount
-
-创建测试目录：
-
-```bash
-cd ~/CodeAgent/files
-mkdir -p /tmp/docker_mount_test
-echo hello > /tmp/docker_mount_test/a.txt
-```
-
-运行挂载测试：
-
-```bash
-docker run --rm \
-  -v /tmp/docker_mount_test:/workspace/repo \
-  -w /workspace/repo \
-  sweagent-multipy:latest \
-  bash -lc 'pwd && ls -la && cat a.txt'
-```
-
-期望输出包含：
+期望：
 
 ```text
-/workspace/repo
-a.txt
-hello
+len: 500
+first: astropy__astropy-12907
 ```
 
-这一步非常重要，因为 batch 运行时会把：
-
-```text
-宿主机 repo_path → 容器 /workspace/repo
-```
-
----
-
-## 12. 最终 Smoke Test
-
-在项目目录下运行：
+验证 Verified 离线：
 
 ```bash
-cd ~/CodeAgent/files
+HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1 python - <<'PY'
+from datasets import load_dataset
+
+ds = load_dataset("princeton-nlp/SWE-bench_Verified", split="test")
+print("offline len:", len(ds))
+print("first:", ds[0]["instance_id"])
+PY
+```
+
+成功后默认开启 offline。为了避免多行 `EOF` 粘贴失败，可以用单行 `printf`：
+
+```bash
+printf '\n# Hugging Face offline mode after Lite / Verified cached\nexport HF_DATASETS_OFFLINE=1\nexport HF_HUB_OFFLINE=1\n' >> ~/.codeagent_env
+
+source ~/.bashrc
 conda activate sweagent
+
+python -c 'import os; print("HF_HOME =", os.environ.get("HF_HOME")); print("HF_ENDPOINT =", os.environ.get("HF_ENDPOINT")); print("HF_DATASETS_OFFLINE =", os.environ.get("HF_DATASETS_OFFLINE")); print("HF_HUB_OFFLINE =", os.environ.get("HF_HUB_OFFLINE"))'
 ```
 
-执行 baseline smoke test：
+---
+
+## 13. SWE-bench raw requirements 本地缓存补丁
+
+这一步用于降低 GitHub raw 下载 requirements 抖动导致的评测失败概率。
+
+### 13.1 定位并备份文件
 
 ```bash
+source ~/.bashrc
+conda activate sweagent
+cd /root/CodeAgent1/files1
+
+PYFILE=$(python - <<'PY'
+import swebench.harness.test_spec.python as p
+print(p.__file__)
+PY
+)
+
+echo "PYFILE=$PYFILE"
+cp "$PYFILE" "${PYFILE}.bak.$(date +%Y%m%d_%H%M%S)"
+ls -lh "$PYFILE" "$PYFILE".bak.*
+```
+
+### 13.2 替换 `get_requirements_by_commit()`
+
+```bash
+python - <<'PY'
+from pathlib import Path
+
+path = Path("/root/miniforge3/envs/sweagent/lib/python3.11/site-packages/swebench/harness/test_spec/python.py")
+text = path.read_text(encoding="utf-8")
+
+start = text.index("def get_requirements_by_commit(")
+end = text.index("\ndef clean_requirements(", start)
+
+new_func = r'''def get_requirements_by_commit(repo: str, commit: str) -> str:
+    """
+    Get requirements.txt from repo at specific commit.
+
+    Local patch:
+    - Cache raw.githubusercontent.com requirements files under
+      $SWEBENCH_RAW_REQ_CACHE_DIR or /root/CodeAgent/swebench_raw_req_cache.
+    - Cache both the main requirements file and recursive -r requirements files.
+    - If network download fails but cached file exists, reuse cached file.
+    """
+    import os
+    import re
+    import requests
+
+    cache_root = os.environ.get(
+        "SWEBENCH_RAW_REQ_CACHE_DIR",
+        "/root/CodeAgent/swebench_raw_req_cache",
+    )
+    os.makedirs(cache_root, exist_ok=True)
+
+    def _safe_cache_name(url: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_.-]+", "__", url)
+
+    def _get_url_text(url: str) -> tuple[int, str]:
+        cache_path = os.path.join(cache_root, _safe_cache_name(url))
+
+        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                return 200, f.read()
+
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=60)
+            if resp.status_code == 200:
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    f.write(resp.text)
+                return resp.status_code, resp.text
+            return resp.status_code, resp.text
+        except Exception:
+            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    return 200, f.read()
+            raise
+
+    for req_path in MAP_REPO_TO_REQS_PATHS[repo]:
+        reqs_url = posixpath.join(SWE_BENCH_URL_RAW, repo, commit, req_path)
+        status_code, reqs_text = _get_url_text(reqs_url)
+        if status_code == 200:
+            break
+    else:
+        raise ValueError(
+            f"Could not find requirements.txt at paths {MAP_REPO_TO_REQS_PATHS[repo]} for repo {repo} at commit {commit}"
+        )
+
+    lines = reqs_text
+    original_req = []
+    additional_reqs = []
+    req_dir = "/".join(req_path.split("/")[:-1])
+
+    exclude_line = lambda line: any(
+        [line.strip().startswith(x) for x in ["-e .", "#", ".[test"]]
+    )
+
+    for line in lines.split("\n"):
+        if line.strip().startswith("-r"):
+            file_name = line[len("-r") :].strip()
+            reqs_url = posixpath.join(
+                SWE_BENCH_URL_RAW,
+                repo,
+                commit,
+                req_dir,
+                file_name,
+            )
+            status_code, extra_text = _get_url_text(reqs_url)
+            if status_code == 200:
+                for line_extra in extra_text.split("\n"):
+                    if not exclude_line(line_extra):
+                        additional_reqs.append(line_extra)
+        else:
+            if not exclude_line(line):
+                original_req.append(line)
+
+    additional_reqs.append("\n".join(original_req))
+    all_reqs = "\n".join(additional_reqs)
+    return all_reqs
+'''
+
+path.write_text(text[:start] + new_func + text[end:], encoding="utf-8")
+print("patched:", path)
+PY
+```
+
+检查：
+
+```bash
+python -m py_compile "$PYFILE"
+
+python - <<'PY'
+import inspect
+import swebench.harness.test_spec.python as p
+
+src = inspect.getsource(p.get_requirements_by_commit)
+print("module:", p.__file__)
+print("has_cache_patch:", "SWEBENCH_RAW_REQ_CACHE_DIR" in src)
+print("has_timeout_60:", "timeout=60" in src)
+PY
+```
+
+期望：
+
+```text
+has_cache_patch: True
+has_timeout_60: True
+```
+
+### 13.3 预热 requirements 缓存
+
+```bash
+source ~/.bashrc
+conda activate sweagent
+cd /root/CodeAgent1/files1
+
+mkdir -p "$SWEBENCH_RAW_REQ_CACHE_DIR"
+
+python - <<'PY'
+import os
+import swebench.harness.test_spec.python as p
+
+print("cache dir:", os.environ.get("SWEBENCH_RAW_REQ_CACHE_DIR"))
+
+txt = p.get_requirements_by_commit(
+    "matplotlib/matplotlib",
+    "28289122be81e0bc0a6ee0c4c5b7343a46ce2e4e",
+)
+
+print("ok length:", len(txt))
+print(txt[:300])
+PY
+```
+
+检查缓存：
+
+```bash
+find "$SWEBENCH_RAW_REQ_CACHE_DIR" -type f | head -20
+du -sh "$SWEBENCH_RAW_REQ_CACHE_DIR"
+```
+
+---
+
+## 14. baseline smoke test
+
+先只跑一个实例，验证链路：dataset 离线加载、repo 准备、Docker、LLM 调用。
+
+```bash
+source ~/.bashrc
+conda activate sweagent
+
+cd /root/CodeAgent1/files1
+
 python mini_swe_agent_integration/run_swebench_batch.py \
   --mode baseline \
+  --llm_backend deepseek \
   --model_name openai/deepseek-v4-flash \
-  --api_base https://uni-api.cstcloud.cn/v1 \
   --subset lite \
   --split test \
   --slice 20:21 \
-  --output_dir ./results/baseline_docker_smoke \
+  --output_dir ./results/server4_baseline_smoke_20_21 \
   --repos_dir ./repos \
   --cache_dir ./cache \
   --workers 1 \
-  --step_limit 60 \
+  --step_limit 20 \
   --use_docker \
   --docker_image sweagent-multipy:latest \
   --redo
 ```
 
-> **注意**  
-> 原文中的 `--slice 20：21` 使用了中文冒号 `：`，这里已修正为英文冒号 `:`：
->
-> ```bash
-> --slice 20:21
-> ```
+结束后检查：
 
-如果不报错，说明环境基本配置成功。
+```bash
+ls -lh ./results/server4_baseline_smoke_20_21
+find ./results/server4_baseline_smoke_20_21 -maxdepth 2 -type f | head -30
+```
 
 ---
 
-## 13. 常见问题排查
-
-### 13.1 `conda: command not found`
-
-执行：
+## 15. 正式运行前健康检查
 
 ```bash
-source ~/miniforge3/etc/profile.d/conda.sh
-conda init bash
 source ~/.bashrc
-```
-
-然后重新验证：
-
-```bash
-conda --version
-```
-
-### 13.2 `ModuleNotFoundError: No module named 'minisweagent'`
-
-在项目根目录执行：
-
-```bash
-python -m pip install -e ./mini-swe-agent
-```
-
-然后验证：
-
-```bash
-python - <<'PY'
-import minisweagent
-print(minisweagent.__file__)
-PY
-```
-
-### 13.3 `ModuleNotFoundError: No module named 'datasets'`
-
-通常说明 `requirements.txt` 没装好，重新执行：
-
-```bash
-cd ~/CodeAgent/files
 conda activate sweagent
-python -m pip install -r requirements.txt
-```
+cd /root/CodeAgent1/files1
 
-或单独安装：
+echo "== Python =="
+which python
+python --version
 
-```bash
-python -m pip install datasets
-```
+echo "== Env =="
+echo "HF_HOME=$HF_HOME"
+echo "HF_ENDPOINT=$HF_ENDPOINT"
+echo "HF_DATASETS_OFFLINE=$HF_DATASETS_OFFLINE"
+echo "HF_HUB_OFFLINE=$HF_HUB_OFFLINE"
+echo "SWEBENCH_RAW_REQ_CACHE_DIR=$SWEBENCH_RAW_REQ_CACHE_DIR"
 
-### 13.4 Docker 在 WSL 中不可用
-
-先检查 Docker Desktop 是否启动。
-
-然后确认：
-
-```text
-Settings → Resources → WSL Integration → Ubuntu-22.04
-```
-
-已经开启。
-
-在 WSL 中验证：
-
-```bash
-docker version
-docker run --rm hello-world
-```
-
-### 13.5 Hugging Face 离线模式加载失败
-
-如果离线加载失败，先关闭离线环境变量，重新在线下载：
-
-```bash
-unset HF_DATASETS_OFFLINE
-unset HF_HUB_OFFLINE
-```
-
-然后执行：
-
-```bash
+echo "== Dataset offline =="
 python - <<'PY'
 from datasets import load_dataset
-
-ds = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
-print(len(ds))
-print(ds[0]["instance_id"])
+print("Lite:", len(load_dataset("princeton-nlp/SWE-bench_Lite", split="test")))
+print("Verified:", len(load_dataset("princeton-nlp/SWE-bench_Verified", split="test")))
 PY
-```
 
-确认下载成功后，再开启离线模式。
+echo "== SWE-bench patch =="
+python - <<'PY'
+import inspect
+import swebench.harness.test_spec.python as p
+src = inspect.getsource(p.get_requirements_by_commit)
+print("module:", p.__file__)
+print("has_cache_patch:", "SWEBENCH_RAW_REQ_CACHE_DIR" in src)
+print("has_timeout_60:", "timeout=60" in src)
+PY
+
+echo "== Docker image =="
+docker images | grep sweagent-multipy
+
+echo "== Docker mirrors =="
+docker info | sed -n '/Registry Mirrors/,+10p'
+
+echo "== Disk =="
+df -h
+docker system df
+```
 
 ---
 
-## 14. 推荐目录结构
+## 16. 预防 Docker eval 镜像问题
 
-推荐最终目录大致如下：
+正式 harness 评测前，建议先预拉一个 SWE-bench eval 镜像：
+
+```bash
+docker pull swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest
+```
+
+如果开始下载 layer，并最终出现：
 
 ```text
-/home/<user>/CodeAgent/
-├── files/
-│   ├── Dockerfile.sweagent-multipy
-│   ├── requirements.txt
-│   ├── mini_swe_agent_integration/
-│   ├── mini-swe-agent/
-│   ├── code_graph_builder/
-│   ├── code_graph_retriever/
-│   ├── repos/
-│   ├── cache/
-│   └── results/
-└── hf_cache/
+Pull complete
 ```
 
-其中：
+或：
 
-| 路径 | 作用 |
-|---|---|
-| `~/CodeAgent/files` | 项目根目录 |
-| `~/CodeAgent/files/repos` | SWE-bench 实例仓库 |
-| `~/CodeAgent/files/cache` | 项目缓存 |
-| `~/CodeAgent/files/results` | 实验输出 |
-| `~/CodeAgent/hf_cache` | Hugging Face 数据集缓存 |
+```text
+Downloaded newer image
+```
+
+说明 Docker 拉 SWE-bench eval 镜像基本可用。
+
+第一次评测建议：
+
+```text
+--max_workers 1
+```
+
+并且不要让两个 `run_evaluation` 同时第一次拉镜像。第一次会大量拉镜像、构建/启动容器，同时跑容易触发网络超时、镜像源限流或磁盘 IO 抖动。
 
 ---
 
-## 15. 最小检查清单
+## 17. 常见问题总结
 
-运行正式实验前，建议确认以下项目：
+### 17.1 `source ~/.bashrc` 后 conda 环境变回 base
 
-- [ ] `wsl -l -v` 显示 `Ubuntu-22.04` 且版本为 `2`
-- [ ] Docker Desktop 已启动
-- [ ] WSL Integration 已启用 `Ubuntu-22.04`
-- [ ] WSL 中 `docker run --rm hello-world` 成功
-- [ ] `conda activate sweagent` 成功
-- [ ] `python --version` 为 Python 3.11.x
-- [ ] `python -m pip install -r requirements.txt` 已完成
-- [ ] `python -m pip install -e ./mini-swe-agent` 已完成
-- [ ] `UNI_API_KEY` 已设置
-- [ ] `DASHSCOPE_API_KEY` 已设置
-- [ ] SWE-bench Lite 已成功下载
-- [ ] Docker 镜像 `sweagent-multipy:latest` 已构建
-- [ ] `--slice` 使用英文冒号，例如 `20:21`
+正常。每次 source 后重新执行：
 
+```bash
+conda activate sweagent
+```
 
-另外还有锁机制
-以下是一些可能出现的问题
+### 17.2 Dockerfile 内部 apt 使用 https 清华源导致 CA 错误
 
-一、预防 GitHub raw requirements 问题
-1. 给 SWE-bench harness 打缓存补丁
-这一步的目的：
-让 get_requirements_by_commit() 下载到的 requirements 文件缓存到本地。以后如果 GitHub raw 抖动，只要之前缓存过，就不会失败。
-执行：
-PYFILE=$(python - <<'PY'import swebench.harness.test_spec.python as pprint(p.__file__)PY)echo "PYFILE=$PYFILE"cp "$PYFILE" "${PYFILE}.bak.$(date +%Y%m%d_%H%M%S)"
-然后替换函数：
-python - <<'PY'from pathlib import Pathpath = Path(__import__("swebench.harness.test_spec.python", fromlist=[""]).__file__)text = path.read_text(encoding="utf-8")start = text.index("def get_requirements_by_commit(")end = text.index("\ndef clean_requirements(", start)new_func = r'''def get_requirements_by_commit(repo: str, commit: str) -> str:    """    Get requirements.txt from repo at specific commit.    Local patch:    - Cache raw.githubusercontent.com requirements files under      $SWEBENCH_RAW_REQ_CACHE_DIR or /root/CodeAgent/swebench_raw_req_cache.    - Cache both the main requirements file and recursive -r requirements files.    - If network download fails but cached file exists, reuse cached file.    """    import os    import re    import requests    cache_root = os.environ.get(        "SWEBENCH_RAW_REQ_CACHE_DIR",        "/root/CodeAgent/swebench_raw_req_cache",    )    os.makedirs(cache_root, exist_ok=True)    def _safe_cache_name(url: str) -> str:        return re.sub(r"[^A-Za-z0-9_.-]+", "__", url)    def _get_url_text(url: str) -> tuple[int, str]:        cache_path = os.path.join(cache_root, _safe_cache_name(url))        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:            with open(cache_path, "r", encoding="utf-8") as f:                return 200, f.read()        try:            resp = requests.get(url, headers=HEADERS, timeout=60)            if resp.status_code == 200:                with open(cache_path, "w", encoding="utf-8") as f:                    f.write(resp.text)                return resp.status_code, resp.text            return resp.status_code, resp.text        except Exception:            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:                with open(cache_path, "r", encoding="utf-8") as f:                    return 200, f.read()            raise    for req_path in MAP_REPO_TO_REQS_PATHS[repo]:        reqs_url = posixpath.join(SWE_BENCH_URL_RAW, repo, commit, req_path)        status_code, reqs_text = _get_url_text(reqs_url)        if status_code == 200:            break    else:        raise ValueError(            f"Could not find requirements.txt at paths {MAP_REPO_TO_REQS_PATHS[repo]} for repo {repo} at commit {commit}"        )    lines = reqs_text    original_req = []    additional_reqs = []    req_dir = "/".join(req_path.split("/")[:-1])    exclude_line = lambda line: any(        [line.strip().startswith(x) for x in ["-e .", "#", ".[test"]]    )    for line in lines.split("\n"):        if line.strip().startswith("-r"):            file_name = line[len("-r") :].strip()            reqs_url = posixpath.join(                SWE_BENCH_URL_RAW,                repo,                commit,                req_dir,                file_name,            )            status_code, extra_text = _get_url_text(reqs_url)            if status_code == 200:                for line_extra in extra_text.split("\n"):                    if not exclude_line(line_extra):                        additional_reqs.append(line_extra)        else:            if not exclude_line(line):                original_req.append(line)    additional_reqs.append("\n".join(original_req))    all_reqs = "\n".join(additional_reqs)    return all_reqs'''path.write_text(text[:start] + new_func + text[end+1:], encoding="utf-8")print("patched:", path)PY
-检查：
-python -m py_compile "$PYFILE"python - <<'PY'import inspectimport swebench.harness.test_spec.python as psrc = inspect.getsource(p.get_requirements_by_commit)print("module:", p.__file__)print("has_cache_patch:", "SWEBENCH_RAW_REQ_CACHE_DIR" in src)print("has_timeout_60:", "timeout=60" in src)PY
-正常应该看到：
-has_cache_patch: Truehas_timeout_60: True
-2. 设置缓存目录
-建议写进 ~/.bashrc：
-grep -q 'SWEBENCH_RAW_REQ_CACHE_DIR' ~/.bashrc || cat >> ~/.bashrc <<'EOF'# SWE-bench raw GitHub requirements cacheexport SWEBENCH_RAW_REQ_CACHE_DIR=/root/CodeAgent/swebench_raw_req_cacheEOFsource ~/.bashrcconda activate sweagentmkdir -p "$SWEBENCH_RAW_REQ_CACHE_DIR"
-3. 预热一个已知容易触发的 requirements 文件
-python - <<'PY'import swebench.harness.test_spec.python as ptxt = p.get_requirements_by_commit(    "matplotlib/matplotlib",    "28289122be81e0bc0a6ee0c4c5b7343a46ce2e4e",)print("ok length:", len(txt))print(txt[:300])PY
-只要这里成功，以后同类 raw requirements 下载问题会少很多。
+错误特征：
 
-二、预防 Docker eval 镜像问题
-1. 配置可用 Docker 镜像源
-先备份：
-sudo cp /etc/docker/daemon.json /etc/docker/daemon.json.bak.$(date +%Y%m%d_%H%M%S) 2>/dev/null || true
-写入镜像源：
-sudo tee /etc/docker/daemon.json >/dev/null <<'JSON'{  "registry-mirrors": [    "https://docker.1ms.run",    "https://docker.xuanyuan.me",    "https://dockerproxy.com"  ],  "features": {    "buildkit": true  }}JSONsudo systemctl daemon-reloadsudo systemctl restart docker
-检查：
-docker info | sed -n '/Registry Mirrors/,+10p'
-应该能看到：
-https://docker.1ms.run/https://docker.xuanyuan.me/https://dockerproxy.com/
-2. 预拉一个 SWE-bench eval 镜像测试
-docker pull swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latest
-如果它开始下载 layer，并最终出现：
-Pull complete
-或者：
-Downloaded newer image
-说明这台服务器的 Docker 拉 SWE-bench eval 镜像基本可用。
+```text
+No system certificates available
+Certificate verification failed
+Unable to locate package ca-certificates
+```
 
-三、正式评测前的一键健康检查
-以后每台服务器跑评测前，可以先执行：
-cd /root/CodeAgent/filessource ~/.bashrcconda activate sweagentecho "== Python =="which pythonpython --versionecho "== SWE-bench patch =="python - <<'PY'import inspectimport swebench.harness.test_spec.python as psrc = inspect.getsource(p.get_requirements_by_commit)print("module:", p.__file__)print("has_cache_patch:", "SWEBENCH_RAW_REQ_CACHE_DIR" in src)PYecho "== raw GitHub =="python - <<'PY'import swebench.harness.test_spec.python as ptxt = p.get_requirements_by_commit(    "matplotlib/matplotlib",    "28289122be81e0bc0a6ee0c4c5b7343a46ce2e4e",)print("requirements length:", len(txt))PYecho "== Docker mirrors =="docker info | sed -n '/Registry Mirrors/,+10p'echo "== Docker pull test =="docker pull swebench/sweb.eval.x86_64.astropy_1776_astropy-12907:latestecho "== Disk =="df -hdocker system df
-这几个都通过后，再跑：
-/root/miniforge3/envs/sweagent/bin/python -m swebench.harness.run_evaluation \  --dataset_name princeton-nlp/SWE-bench_Lite \  --split test \  --predictions_path results/你的结果目录/preds.json \  --max_workers 1 \  --run_id 你的run_id
+解决：Dockerfile 内 apt 源先用：
 
-四、额外建议：不要让两个 harness 同时第一次拉镜像
-如果服务器上还没缓存 SWE-bench eval 镜像，第一次评测时建议：
---max_workers 1
-并且不要两个 run_evaluation 同时跑。因为第一次会大量拉镜像、构建/启动容器，两个进程同时跑更容易触发网络超时、镜像源限流、磁盘 IO 抖动。
-等常用 eval 镜像拉完之后，再并行会稳很多。
+```text
+http://mirrors.tuna.tsinghua.edu.cn/ubuntu
+```
 
-结论：
-新服务器从头预防，就做两件事：先给 SWE-bench harness 打 raw requirements 本地缓存补丁；再配置可用 Docker registry mirrors 并预拉一个 swebench/sweb.eval... 镜像测试。
+不要一开始用 `https://...`。
+
+### 17.3 numpy / scipy 多版本 download 冲突
+
+错误特征：
+
+```text
+Cannot install numpy==1.21.6 and numpy==1.22.4
+ResolutionImpossible
+```
+
+解决：逐个版本单独 `pip download --no-deps`。
+
+### 17.4 deadsnakes PPA 慢
+
+如果日志是：
+
+```text
+Get: ... https://ppa.launchpadcontent.net/deadsnakes/ppa/ubuntu ...
+```
+
+且没有 CA 证书错误，一般只是网速慢，可以等。
+
+### 17.5 终端无法粘贴多行 EOF
+
+用 `printf` 单行替代。例如写入 HF offline：
+
+```bash
+printf '\n# Hugging Face offline mode after Lite / Verified cached\nexport HF_DATASETS_OFFLINE=1\nexport HF_HUB_OFFLINE=1\n' >> ~/.codeagent_env
+```
+
+---
+
+## 18. 最小检查清单
+
+正式实验前确认：
+
+- [ ] SSH 使用 `ssh -i ~/.ssh/sweagent_server4.pem root@47.96.149.209`
+- [ ] 4 份代码存在：`/root/CodeAgent1/files1` 到 `/root/CodeAgent4/files4`
+- [ ] 4 份代码 commit 一致
+- [ ] `source ~/.bashrc && conda activate sweagent` 正常
+- [ ] `UNI_API_KEY` / `DASHSCOPE_API_KEY` / `DEEPSEEK_API_KEY` 已设置
+- [ ] `pip config list` 显示清华 PyPI 镜像
+- [ ] `HF_ENDPOINT=https://hf-mirror.com`
+- [ ] Lite / Verified 已离线加载成功
+- [ ] `HF_DATASETS_OFFLINE=1` 和 `HF_HUB_OFFLINE=1`
+- [ ] SWE-bench raw requirements 缓存补丁检查为 True
+- [ ] Docker registry mirrors 生效
+- [ ] `sweagent-multipy:latest` 构建成功
+- [ ] Docker 挂载测试成功
+- [ ] baseline smoke test 能正常启动
+
