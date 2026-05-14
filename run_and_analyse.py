@@ -7,6 +7,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
@@ -37,6 +38,7 @@ LOGS_ROOT = Path("./logs/run_evaluation")
 # 可通过环境变量覆盖：
 #   export SWEBENCH_EVAL_LOCK_PATH=/tmp/swebench_eval.lock
 EVAL_LOCK_PATH = Path(os.environ.get("SWEBENCH_EVAL_LOCK_PATH", "/tmp/swebench_eval.lock"))
+DEFAULT_EVAL_LOCK_SLOTS = int(os.environ.get("SWEBENCH_EVAL_LOCK_SLOTS", "2"))
 
 BATCH_CMD = [
     sys.executable,
@@ -108,6 +110,15 @@ def parse_args() -> argparse.Namespace:
         "--no-eval-lock",
         action="store_true",
         help="禁用 evaluation 全局锁。不建议在同一服务器多进程评测时使用。",
+    )
+    parser.add_argument(
+        "--eval-lock-slots",
+        type=int,
+        default=None,
+        help=(
+            "SWE-bench harness evaluation 并发锁槽位数。"
+            "默认读取环境变量 SWEBENCH_EVAL_LOCK_SLOTS；否则为 2。"
+        ),
     )
     return parser.parse_args()
 
@@ -265,46 +276,68 @@ def run_and_log(
     )
     return returncode
 
-
 @contextmanager
-def evaluation_lock(lock_path: Path):
+def evaluation_lock(lock_path: Path, slots: int = DEFAULT_EVAL_LOCK_SLOTS):
     """
-    服务器级互斥锁。
+    服务器级评测并发锁。
 
-    这个锁只保护 SWE-bench harness evaluation 阶段。
-    不锁 agent batch 阶段，避免把多个进程完全串行化。
+    slots=1 时等价于原始单锁；
+    slots=2 时最多允许两个进程同时进入 SWE-bench harness evaluation。
 
-    为什么用 fcntl.flock：
-    - Linux 原生可用；
-    - 同一台服务器所有项目目录共享同一个锁文件；
-    - 进程异常退出时，文件锁会随 fd 关闭自动释放。
+    实现方式：
+    - slots=1 使用 /tmp/swebench_eval.lock
+    - slots=2 使用：
+        /tmp/swebench_eval.lock.slot0
+        /tmp/swebench_eval.lock.slot1
     """
+    slots = max(int(slots or 1), 1)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with lock_path.open("a+", encoding="utf-8") as f:
-        f.write(
-            f"[{datetime.now().isoformat(timespec='seconds')}] "
-            f"pid={os.getpid()} waiting for evaluation lock\n"
-        )
-        f.flush()
+    acquired_file = None
+    acquired_slot = None
 
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    try:
+        while acquired_file is None:
+            for slot in range(slots):
+                slot_path = lock_path if slots == 1 else Path(f"{lock_path}.slot{slot}")
+                f = slot_path.open("a+", encoding="utf-8")
 
-        f.write(
-            f"[{datetime.now().isoformat(timespec='seconds')}] "
-            f"pid={os.getpid()} acquired evaluation lock\n"
-        )
-        f.flush()
+                try:
+                    f.write(
+                        f"[{datetime.now().isoformat(timespec='seconds')}] "
+                        f"pid={os.getpid()} trying evaluation lock slot={slot}/{slots}\n"
+                    )
+                    f.flush()
 
-        try:
-            yield
-        finally:
-            f.write(
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                    acquired_file = f
+                    acquired_slot = slot
+
+                    f.write(
+                        f"[{datetime.now().isoformat(timespec='seconds')}] "
+                        f"pid={os.getpid()} acquired evaluation lock slot={slot}/{slots}\n"
+                    )
+                    f.flush()
+                    break
+
+                except BlockingIOError:
+                    f.close()
+
+            if acquired_file is None:
+                time.sleep(5)
+
+        yield
+
+    finally:
+        if acquired_file is not None:
+            acquired_file.write(
                 f"[{datetime.now().isoformat(timespec='seconds')}] "
-                f"pid={os.getpid()} released evaluation lock\n"
+                f"pid={os.getpid()} released evaluation lock slot={acquired_slot}/{slots}\n"
             )
-            f.flush()
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            acquired_file.flush()
+            fcntl.flock(acquired_file.fileno(), fcntl.LOCK_UN)
+            acquired_file.close()
 
 
 def load_preds(preds_path: Path):
@@ -562,6 +595,12 @@ def main() -> int:
     else:
         eval_lock_path = EVAL_LOCK_PATH
 
+    eval_lock_slots = (
+        args.eval_lock_slots
+        if args.eval_lock_slots is not None
+        else DEFAULT_EVAL_LOCK_SLOTS
+    )
+
     print("Resolved config:")
     print(f"- subset       : {subset_value}")
     print(f"- dataset_name : {dataset_name}")
@@ -573,6 +612,8 @@ def main() -> int:
     print(f"- running_log  : {running_log}")
     print(f"- analyse_log  : {analyse_log}")
     print(f"- eval_lock    : {'disabled' if args.no_eval_lock else eval_lock_path}")
+    if not args.no_eval_lock:
+        print(f"- eval_slots   : {eval_lock_slots}")
 
     print("\nStep 1/3: running SWE-agent batch. Output ->", running_log)
     batch_code = run_and_log(batch_cmd, running_log, "SWE-agent batch running log")
@@ -604,9 +645,9 @@ def main() -> int:
             pre_output_text=eval_prelude,
         )
     else:
-        print(f"Waiting for SWE-bench evaluation lock: {eval_lock_path}")
-        with evaluation_lock(eval_lock_path):
-            print(f"Acquired SWE-bench evaluation lock: {eval_lock_path}")
+        print(f"Waiting for SWE-bench evaluation lock: {eval_lock_path} slots={eval_lock_slots}")
+        with evaluation_lock(eval_lock_path, eval_lock_slots):
+            print(f"Acquired SWE-bench evaluation lock: {eval_lock_path} slots={eval_lock_slots}")
             eval_code = run_and_log(
                 eval_cmd,
                 analyse_log,
