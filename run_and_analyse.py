@@ -7,6 +7,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
@@ -37,6 +38,12 @@ LOGS_ROOT = Path("./logs/run_evaluation")
 # 可通过环境变量覆盖：
 #   export SWEBENCH_EVAL_LOCK_PATH=/tmp/swebench_eval.lock
 EVAL_LOCK_PATH = Path(os.environ.get("SWEBENCH_EVAL_LOCK_PATH", "/tmp/swebench_eval.lock"))
+
+# 允许多少个进程同时进入 SWE-bench harness evaluation。
+# 默认 2：适合代理已配置好、想提高吞吐的场景。
+# 如需退回单进程评测：
+#   export SWEBENCH_EVAL_LOCK_SLOTS=1
+DEFAULT_EVAL_LOCK_SLOTS = int(os.environ.get("SWEBENCH_EVAL_LOCK_SLOTS", "2"))
 
 BATCH_CMD = [
     sys.executable,
@@ -102,6 +109,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "SWE-bench harness evaluation 的全服务器锁文件路径。"
             "默认读取环境变量 SWEBENCH_EVAL_LOCK_PATH；否则使用 /tmp/swebench_eval.lock。"
+        ),
+    )
+    parser.add_argument(
+        "--eval-lock-slots",
+        type=int,
+        default=DEFAULT_EVAL_LOCK_SLOTS,
+        help=(
+            "允许同时进入 SWE-bench harness evaluation 的进程数。"
+            "默认读取环境变量 SWEBENCH_EVAL_LOCK_SLOTS；否则为 2。"
         ),
     )
     parser.add_argument(
@@ -267,44 +283,71 @@ def run_and_log(
 
 
 @contextmanager
-def evaluation_lock(lock_path: Path):
+def evaluation_lock(lock_path: Path, slots: int = DEFAULT_EVAL_LOCK_SLOTS):
     """
-    服务器级互斥锁。
+    服务器级 evaluation 并发限制。
 
-    这个锁只保护 SWE-bench harness evaluation 阶段。
-    不锁 agent batch 阶段，避免把多个进程完全串行化。
+    原来是单个 fcntl.LOCK_EX 互斥锁，同一时间只允许 1 个进程
+    进入 SWE-bench harness evaluation。
 
-    为什么用 fcntl.flock：
-    - Linux 原生可用；
-    - 同一台服务器所有项目目录共享同一个锁文件；
+    现在改成 slot semaphore：
+    - slots=2 时，会创建/竞争两个锁文件：
+        /tmp/swebench_eval.lock.slot0
+        /tmp/swebench_eval.lock.slot1
+    - 任意进程抢到一个 slot 就可以进入 evaluation；
+    - 两个 slot 都被占用时，后续进程等待；
     - 进程异常退出时，文件锁会随 fd 关闭自动释放。
+
+    可通过环境变量调整：
+      export SWEBENCH_EVAL_LOCK_SLOTS=1   # 退回单进程
+      export SWEBENCH_EVAL_LOCK_SLOTS=2   # 默认，两进程并发评测
     """
+    if slots < 1:
+        raise ValueError(f"eval lock slots must be >= 1, got {slots}")
+
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with lock_path.open("a+", encoding="utf-8") as f:
-        f.write(
+    acquired_file = None
+    acquired_slot = None
+
+    try:
+        while acquired_file is None:
+            for slot in range(slots):
+                slot_path = Path(f"{lock_path}.slot{slot}")
+                f = slot_path.open("a+", encoding="utf-8")
+
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    f.close()
+                    continue
+
+                acquired_file = f
+                acquired_slot = slot
+                break
+
+            if acquired_file is None:
+                # 不要忙等；多个进程等待时每 10 秒重试一次。
+                time.sleep(10)
+
+        assert acquired_file is not None
+        acquired_file.write(
             f"[{datetime.now().isoformat(timespec='seconds')}] "
-            f"pid={os.getpid()} waiting for evaluation lock\n"
+            f"pid={os.getpid()} acquired evaluation slot {acquired_slot}/{slots}\n"
         )
-        f.flush()
+        acquired_file.flush()
 
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield acquired_slot
 
-        f.write(
-            f"[{datetime.now().isoformat(timespec='seconds')}] "
-            f"pid={os.getpid()} acquired evaluation lock\n"
-        )
-        f.flush()
-
-        try:
-            yield
-        finally:
-            f.write(
+    finally:
+        if acquired_file is not None:
+            acquired_file.write(
                 f"[{datetime.now().isoformat(timespec='seconds')}] "
-                f"pid={os.getpid()} released evaluation lock\n"
+                f"pid={os.getpid()} released evaluation slot {acquired_slot}/{slots}\n"
             )
-            f.flush()
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            acquired_file.flush()
+            fcntl.flock(acquired_file.fileno(), fcntl.LOCK_UN)
+            acquired_file.close()
 
 
 def load_preds(preds_path: Path):
@@ -562,6 +605,10 @@ def main() -> int:
     else:
         eval_lock_path = EVAL_LOCK_PATH
 
+    eval_lock_slots = args.eval_lock_slots
+    if eval_lock_slots < 1:
+        raise ValueError(f"--eval-lock-slots must be >= 1, got {eval_lock_slots}")
+
     print("Resolved config:")
     print(f"- subset       : {subset_value}")
     print(f"- dataset_name : {dataset_name}")
@@ -573,6 +620,7 @@ def main() -> int:
     print(f"- running_log  : {running_log}")
     print(f"- analyse_log  : {analyse_log}")
     print(f"- eval_lock    : {'disabled' if args.no_eval_lock else eval_lock_path}")
+    print(f"- eval_slots   : {'disabled' if args.no_eval_lock else eval_lock_slots}")
 
     print("\nStep 1/3: running SWE-agent batch. Output ->", running_log)
     batch_code = run_and_log(batch_cmd, running_log, "SWE-agent batch running log")
@@ -593,6 +641,7 @@ def main() -> int:
         f"[run_and_analyse] dataset_name={dataset_name}\n"
         f"[run_and_analyse] split={split_value}\n"
         f"[run_and_analyse] eval_lock={'disabled' if args.no_eval_lock else str(eval_lock_path)}\n"
+        f"[run_and_analyse] eval_slots={'disabled' if args.no_eval_lock else eval_lock_slots}\n"
         f"[run_and_analyse] started_eval_step_at={datetime.now().isoformat(timespec='seconds')}\n"
     )
 
@@ -604,19 +653,20 @@ def main() -> int:
             pre_output_text=eval_prelude,
         )
     else:
-        print(f"Waiting for SWE-bench evaluation lock: {eval_lock_path}")
-        with evaluation_lock(eval_lock_path):
-            print(f"Acquired SWE-bench evaluation lock: {eval_lock_path}")
+        print(f"Waiting for SWE-bench evaluation slot: {eval_lock_path} slots={eval_lock_slots}")
+        with evaluation_lock(eval_lock_path, eval_lock_slots) as eval_slot:
+            print(f"Acquired SWE-bench evaluation slot: {eval_lock_path}.slot{eval_slot}")
             eval_code = run_and_log(
                 eval_cmd,
                 analyse_log,
                 "SWE-bench evaluation log",
                 pre_output_text=(
                     eval_prelude
+                    + f"[run_and_analyse] acquired_eval_lock_slot={eval_slot}\n"
                     + f"[run_and_analyse] acquired_eval_lock_at={datetime.now().isoformat(timespec='seconds')}\n"
                 ),
             )
-        print(f"Released SWE-bench evaluation lock: {eval_lock_path}")
+        print(f"Released SWE-bench evaluation slot: {eval_lock_path}.slot{eval_slot}")
 
     print("Step 3/3: appending per-instance summary ->", analyse_log)
     append_per_instance_summary(
