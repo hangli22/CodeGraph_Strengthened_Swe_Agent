@@ -40,10 +40,10 @@ LOGS_ROOT = Path("./logs/run_evaluation")
 EVAL_LOCK_PATH = Path(os.environ.get("SWEBENCH_EVAL_LOCK_PATH", "/tmp/swebench_eval.lock"))
 
 # 允许多少个进程同时进入 SWE-bench harness evaluation。
-# 默认 2：适合代理已配置好、想提高吞吐的场景。
+# 默认 3：适合代理已配置好、想进一步提高吞吐的场景。
 # 如需退回单进程评测：
 #   export SWEBENCH_EVAL_LOCK_SLOTS=1
-DEFAULT_EVAL_LOCK_SLOTS = int(os.environ.get("SWEBENCH_EVAL_LOCK_SLOTS", "2"))
+DEFAULT_EVAL_LOCK_SLOTS = int(os.environ.get("SWEBENCH_EVAL_LOCK_SLOTS", "3"))
 
 BATCH_CMD = [
     sys.executable,
@@ -117,7 +117,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_EVAL_LOCK_SLOTS,
         help=(
             "允许同时进入 SWE-bench harness evaluation 的进程数。"
-            "默认读取环境变量 SWEBENCH_EVAL_LOCK_SLOTS；否则为 2。"
+            "默认读取环境变量 SWEBENCH_EVAL_LOCK_SLOTS；否则为 3。"
         ),
     )
     parser.add_argument(
@@ -291,16 +291,17 @@ def evaluation_lock(lock_path: Path, slots: int = DEFAULT_EVAL_LOCK_SLOTS):
     进入 SWE-bench harness evaluation。
 
     现在改成 slot semaphore：
-    - slots=2 时，会创建/竞争两个锁文件：
+    - slots=3 时，会创建/竞争三个锁文件：
         /tmp/swebench_eval.lock.slot0
         /tmp/swebench_eval.lock.slot1
+        /tmp/swebench_eval.lock.slot2
     - 任意进程抢到一个 slot 就可以进入 evaluation；
     - 两个 slot 都被占用时，后续进程等待；
     - 进程异常退出时，文件锁会随 fd 关闭自动释放。
 
     可通过环境变量调整：
       export SWEBENCH_EVAL_LOCK_SLOTS=1   # 退回单进程
-      export SWEBENCH_EVAL_LOCK_SLOTS=2   # 默认，两进程并发评测
+      export SWEBENCH_EVAL_LOCK_SLOTS=3   # 默认，三进程并发评测
     """
     if slots < 1:
         raise ValueError(f"eval lock slots must be >= 1, got {slots}")
