@@ -19,6 +19,14 @@ from pathlib import Path
 
 DEFAULT_OUTPUT_DIR = Path("./results/retrieval_lihang_11")
 DEFAULT_SLICE = "10:30"
+DEFAULT_SUBSET = "lite"
+DEFAULT_SPLIT = "test"
+
+DATASET_MAPPING = {
+    "lite": "princeton-nlp/SWE-bench_Lite",
+    "verified": "princeton-nlp/SWE-bench_Verified",
+    "full": "princeton-nlp/SWE-bench",
+}
 
 LOGS_ROOT = Path("./logs/run_evaluation")
 
@@ -36,9 +44,9 @@ BATCH_CMD = [
     "--mode", "retrieval",
     "--llm_backend", "uni",
     "--model_name", "openai/deepseek-v4-flash",
-    "--subset", "lite",
-    "--split", "test",
-    "--slice", "10:30",
+    "--subset", DEFAULT_SUBSET,
+    "--split", DEFAULT_SPLIT,
+    "--slice", DEFAULT_SLICE,
     "--output_dir", str(DEFAULT_OUTPUT_DIR),
     "--repos_dir", "./repos",
     "--cache_dir", "./cache",
@@ -71,14 +79,22 @@ def parse_args() -> argparse.Namespace:
         help="可选。手动指定 swebench harness 的 run_id；不指定则根据 output_dir 和 slice 自动生成。",
     )
     parser.add_argument(
+        "--dataset-name",
+        default=None,
+        help=(
+            "可选。手动指定 swebench harness 的 dataset_name。"
+            "不指定时会从 --batch-cmd 的 --subset 自动推导。"
+        ),
+    )
+    parser.add_argument(
         "--running-log",
         default="running.md",
         help="batch 运行日志输出文件，默认 running.md。",
     )
     parser.add_argument(
         "--analyse-log",
-        default="annlyse_result.md",
-        help="评测与逐条分析输出文件，默认 annlyse_result.md。",
+        default="analyse_result.md",
+        help="评测与逐条分析输出文件，默认 analyse_result.md。",
     )
     parser.add_argument(
         "--eval-lock-path",
@@ -121,6 +137,31 @@ def get_option_value(cmd: list[str], option: str, default: str | None = None) ->
     return default
 
 
+def dataset_name_from_subset(subset: str | None) -> str:
+    """
+    将 run_swebench_batch.py 的 --subset 转换为 swebench harness 的 --dataset_name。
+
+    支持：
+      lite     -> princeton-nlp/SWE-bench_Lite
+      verified -> princeton-nlp/SWE-bench_Verified
+      full     -> princeton-nlp/SWE-bench
+
+    如果用户直接传了完整 dataset path，也允许透传。
+    """
+    subset = (subset or DEFAULT_SUBSET).strip()
+
+    if subset in DATASET_MAPPING:
+        return DATASET_MAPPING[subset]
+
+    if "/" in subset:
+        return subset
+
+    raise ValueError(
+        f"Unsupported subset: {subset!r}. "
+        f"Expected one of {sorted(DATASET_MAPPING)} or a full dataset path."
+    )
+
+
 def normalize_slice_name(slice_value: str | None) -> str:
     """
     10:30 -> 10_30
@@ -146,12 +187,17 @@ def make_run_id(output_dir: Path, slice_value: str | None) -> str:
     return f"{output_name}_{slice_name}"
 
 
-def build_eval_cmd(preds_path: Path, run_id: str) -> list[str]:
+def build_eval_cmd(
+    preds_path: Path,
+    run_id: str,
+    dataset_name: str,
+    split: str,
+) -> list[str]:
     return [
         sys.executable,
         "-m", "swebench.harness.run_evaluation",
-        "--dataset_name", "princeton-nlp/SWE-bench_Lite",
-        "--split", "test",
+        "--dataset_name", dataset_name,
+        "--split", split,
         "--predictions_path", str(preds_path),
         "--max_workers", "1",
         "--run_id", run_id,
@@ -484,11 +530,18 @@ def main() -> int:
 
     output_dir_value = get_option_value(batch_cmd, "--output_dir", str(DEFAULT_OUTPUT_DIR))
     slice_value = get_option_value(batch_cmd, "--slice", DEFAULT_SLICE)
+    subset_value = get_option_value(batch_cmd, "--subset", DEFAULT_SUBSET)
+    split_value = get_option_value(batch_cmd, "--split", DEFAULT_SPLIT)
 
     if output_dir_value is None:
         output_dir = DEFAULT_OUTPUT_DIR
     else:
         output_dir = Path(output_dir_value)
+
+    if split_value is None:
+        split_value = DEFAULT_SPLIT
+
+    dataset_name = args.dataset_name or dataset_name_from_subset(subset_value)
 
     preds_path = output_dir / "preds.json"
 
@@ -497,7 +550,12 @@ def main() -> int:
     running_log = Path(args.running_log)
     analyse_log = Path(args.analyse_log)
 
-    eval_cmd = build_eval_cmd(preds_path, run_id)
+    eval_cmd = build_eval_cmd(
+        preds_path=preds_path,
+        run_id=run_id,
+        dataset_name=dataset_name,
+        split=split_value,
+    )
 
     if args.eval_lock_path:
         eval_lock_path = Path(args.eval_lock_path)
@@ -505,6 +563,9 @@ def main() -> int:
         eval_lock_path = EVAL_LOCK_PATH
 
     print("Resolved config:")
+    print(f"- subset       : {subset_value}")
+    print(f"- dataset_name : {dataset_name}")
+    print(f"- split        : {split_value}")
     print(f"- slice        : {slice_value}")
     print(f"- output_dir   : {output_dir}")
     print(f"- preds_path   : {preds_path}")
@@ -528,6 +589,9 @@ def main() -> int:
 
     eval_prelude = (
         f"[run_and_analyse] pid={os.getpid()}\n"
+        f"[run_and_analyse] subset={subset_value}\n"
+        f"[run_and_analyse] dataset_name={dataset_name}\n"
+        f"[run_and_analyse] split={split_value}\n"
         f"[run_and_analyse] eval_lock={'disabled' if args.no_eval_lock else str(eval_lock_path)}\n"
         f"[run_and_analyse] started_eval_step_at={datetime.now().isoformat(timespec='seconds')}\n"
     )
