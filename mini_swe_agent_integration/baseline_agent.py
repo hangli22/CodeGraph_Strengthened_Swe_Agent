@@ -19,7 +19,9 @@ from minisweagent.agents.default import DefaultAgent, AgentConfig
 from minisweagent.exceptions import Submitted
 
 logger = logging.getLogger(__name__)
-
+BASELINE_OUTPUT_MAX_CHARS = 6000
+BASELINE_OUTPUT_HEAD_CHARS = 2500
+BASELINE_OUTPUT_TAIL_CHARS = 2500
 
 class BaselineAgentConfig(AgentConfig):
     """与 AgentConfig 相同，暂不增加字段。"""
@@ -109,6 +111,15 @@ class BaselineAgent(DefaultAgent):
                 return submit_guard
 
         # ------------------------------------------------------------
+        # 高风险大输出命令硬拦截
+        # ------------------------------------------------------------
+        if self._is_blocked_broad_output_command(command_stripped):
+            logger.warning("阻止高风险大输出命令: %s", command[:200])
+            return self._make_output(
+                self._make_broad_output_block_message(command),
+                returncode=1,
+            )
+        # ------------------------------------------------------------
         # sed -i 硬拦截
         # ------------------------------------------------------------
         if self._is_blocked_sed_i_command(command_stripped):
@@ -171,6 +182,10 @@ class BaselineAgent(DefaultAgent):
 
             if pre_warning or post_warning:
                 result["output"] = f"{pre_warning}{result.get('output', '')}{post_warning}"
+
+            # 最后统一截断 observation，防止 cat 大文件 / 宽 git diff / 宽测试输出污染上下文。
+            # 注意：上面的 git diff 状态判断已经使用了截断前 output_text。
+            result = self._truncate_result_output(result, command_stripped)
 
             return result
 
@@ -313,6 +328,109 @@ class BaselineAgent(DefaultAgent):
         ]
 
         return any(re.search(pattern, lowered) for pattern in important_patterns)
+
+    @staticmethod
+    def _is_blocked_broad_output_command(command: str) -> bool:
+        """
+        阻止容易产生超大 observation 的命令。
+
+        背景：
+        - baseline 没有 retrieval 工具，模型容易用 cat/git diff/diff -ruN 暴力看内容。
+        - 超大 observation 会进入下一轮 messages，可能触发：
+          Request body larger than maxBodyLength limit。
+        """
+        if not command:
+            return False
+
+        lowered = command.lower().strip()
+
+        # diff -ruN . ~/original_backup 这类非常危险，可能输出整个仓库。
+        if re.search(r"\bdiff\s+[-\w]*r[-\w]*\b", lowered):
+            return True
+
+        # git diff --no-index 也可能变成大范围目录 diff。
+        if re.search(r"\bgit\s+diff\b.*\b--no-index\b", lowered):
+            return True
+
+        # 组合 fallback：git diff ... || diff -ruN ...
+        if re.search(r"\bgit\s+diff\b", lowered) and re.search(r"\|\||;", lowered) and re.search(r"\bdiff\s+", lowered):
+            return True
+
+        # 阻止直接 cat 源码/配置/大文本文件。鼓励用 nl/sed/head/tail 精读。
+        # 允许 cat .git/HEAD 这种极小诊断。
+        if re.search(r"(^|[;&|]\s*)cat\s+", lowered):
+            if re.search(r"\bcat\s+[^;&|]+/\.git/head\b", lowered):
+                return False
+
+            risky_exts = (
+                ".py", ".pyi", ".js", ".ts", ".tsx", ".jsx",
+                ".java", ".go", ".rs", ".c", ".cc", ".cpp", ".h",
+                ".md", ".rst", ".txt", ".json", ".yaml", ".yml",
+                ".html", ".css", ".xml",
+            )
+            if any(ext in lowered for ext in risky_exts):
+                return True
+
+        return False
+
+    @staticmethod
+    def _make_broad_output_block_message(command: str) -> str:
+        return (
+            "[policy error] This command was blocked because it can produce a very large output "
+            "and pollute the next LLM request context.\n\n"
+            "Why this is blocked:\n"
+            "- Large `cat`, recursive `diff -ruN`, or broad `git diff --no-index` output can make the next "
+            "LLM request exceed the provider request-body limit.\n"
+            "- This previously caused `Request body larger than maxBodyLength limit`, repeated retries, "
+            "and missing preds.json for the slice.\n\n"
+            "Use focused commands instead:\n"
+            "- `nl -ba path/to/file.py | sed -n '120,220p'`\n"
+            "- `grep -n \"specific_pattern\" path/to/file.py | head -20`\n"
+            "- `git diff -- path/to/changed_file.py`\n"
+            "- `git diff` only when you are ready to inspect the final minimal working-tree diff.\n\n"
+            "Blocked command:\n"
+            f"{command}"
+        )
+
+    @staticmethod
+    def _truncate_text_for_observation(text: str) -> str:
+        text = str(text or "")
+        n = len(text)
+
+        if n <= BASELINE_OUTPUT_MAX_CHARS:
+            return text
+
+        head = text[:BASELINE_OUTPUT_HEAD_CHARS]
+        tail = text[-BASELINE_OUTPUT_TAIL_CHARS:]
+        omitted = n - BASELINE_OUTPUT_HEAD_CHARS - BASELINE_OUTPUT_TAIL_CHARS
+
+        return (
+            f"[output truncated] Original output was {n} characters. "
+            f"Showing first {BASELINE_OUTPUT_HEAD_CHARS} and last {BASELINE_OUTPUT_TAIL_CHARS} characters.\n\n"
+            "Do NOT repeat the same broad command. Use focused reads such as:\n"
+            "- nl -ba path/to/file.py | sed -n '120,220p'\n"
+            "- grep -n \"specific_pattern\" path/to/file.py | head -20\n"
+            "- git diff -- path/to/changed_file.py\n\n"
+            "===== OUTPUT HEAD =====\n"
+            f"{head}\n"
+            f"\n===== {omitted} CHARACTERS ELIDED =====\n"
+            "===== OUTPUT TAIL =====\n"
+            f"{tail}"
+        )
+
+    @classmethod
+    def _truncate_result_output(cls, result: dict, command: str = "") -> dict:
+        if not isinstance(result, dict):
+            return result
+
+        output = str(result.get("output", "") or "")
+        result["output"] = cls._truncate_text_for_observation(output)
+
+        exception_info = str(result.get("exception_info", "") or "")
+        if exception_info:
+            result["exception_info"] = cls._truncate_text_for_observation(exception_info)
+
+        return result
 
     @staticmethod
     def _looks_like_wrong_workspace_root(command: str) -> bool:
@@ -760,6 +878,9 @@ class BaselineAgent(DefaultAgent):
             "warn_wrong_workspace_root": True,
             "warn_returncode_zero_with_failure_markers": True,
             "warn_destructive_git_diff": True,
+            "block_broad_output_commands": True,
+            "truncate_long_bash_observations": True,
+            "baseline_output_max_chars": BASELINE_OUTPUT_MAX_CHARS,
             "allow_multiple_bash_actions": True,
         }
 

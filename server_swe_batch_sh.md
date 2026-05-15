@@ -52,6 +52,10 @@ CHUNK_SIZE="${CHUNK_SIZE:-10}"
 #   - submit/run deletes remote old result/run script for the slice before running
 # It does NOT delete local cache.
 FORCE="${FORCE:-0}"
+# Whether submit-range persists generated cache after each slice.
+# 1 = persist generated cache to _persist/<range>/cache/slice_x_y
+# 0 = do not persist generated cache; still uploads/uses input cache.
+PERSIST_GENERATED_CACHE="${PERSIST_GENERATED_CACHE:-0}"
 # Remote persistent save root.
 # submit-range 会把每个 slice 完成后的 result/cache 复制到这里。
 # 默认放在 REMOTE_PROJECT 外层可见目录下，避免被普通 cleanup 删除。
@@ -1058,6 +1062,7 @@ WORKERS="${WORKERS}"
 STEP_LIMIT="${STEP_LIMIT}"
 DOCKER_IMAGE="${DOCKER_IMAGE}"
 RUN_PREFIX="${RUN_PREFIX}"
+PERSIST_GENERATED_CACHE="${PERSIST_GENERATED_CACHE}"
 
 mkdir -p "\${REMOTE_PROJECT}/_server_runs" "\${PERSIST_ROOT}"
 
@@ -1083,6 +1088,7 @@ WORKERS="__WORKERS__"
 STEP_LIMIT="__STEP_LIMIT__"
 DOCKER_IMAGE="__DOCKER_IMAGE__"
 RUN_PREFIX="__RUN_PREFIX__"
+PERSIST_GENERATED_CACHE="__PERSIST_GENERATED_CACHE__"
 
 cd "\${REMOTE_PROJECT}"
 
@@ -1224,10 +1230,12 @@ while (( cur < END )); do
       "\${PERSIST_ROOT}/results/slice_\${slice}/results/\${out_name}/"
   fi
 
-  if [[ -d "\${REMOTE_PROJECT}/cache" ]]; then
+  if [[ "\${PERSIST_GENERATED_CACHE}" == "1" && -d "\${REMOTE_PROJECT}/cache" ]]; then
     rsync -a --delete \
       "\${REMOTE_PROJECT}/cache/" \
       "\${PERSIST_ROOT}/cache/slice_\${slice}/"
+  else
+    echo "[range] Skip persisting generated cache for \${slice}; PERSIST_GENERATED_CACHE=\${PERSIST_GENERATED_CACHE}"
   fi
 
   if [[ -d "\${REMOTE_PROJECT}/logs/run_evaluation" ]]; then
@@ -1277,6 +1285,7 @@ repls = {
     "__STEP_LIMIT__": "${STEP_LIMIT}",
     "__DOCKER_IMAGE__": "${DOCKER_IMAGE}",
     "__RUN_PREFIX__": "${RUN_PREFIX}",
+    "__PERSIST_GENERATED_CACHE__": "${PERSIST_GENERATED_CACHE}",
 }
 for k, v in repls.items():
     text = text.replace(k, v)
